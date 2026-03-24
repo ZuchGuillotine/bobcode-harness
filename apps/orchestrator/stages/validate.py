@@ -5,18 +5,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from typing import Any
 
 from apps.orchestrator.agents.reviewer import ReviewerAgent
 from apps.orchestrator.budget import budget_enforcer
+from packages.config import get_project_paths
 from packages.eval.deterministic import DeterministicEvaluator
+from packages.learning.community_feedback import append_feedback_event, build_feedback_event
 from packages.llm.router import LLMRouter
 from packages.state.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
-
-_DB_PATH = os.environ.get("HARNESS_DB_PATH", os.path.join(".harness", "harness.db"))
 
 # Confidence threshold below which we invoke the Reviewer
 _REVIEW_THRESHOLD = 0.85
@@ -35,6 +34,10 @@ def validate_node(state: dict[str, Any]) -> dict[str, Any]:
     plan = state.get("plan") or {}
     artifacts = state.get("artifacts", [])
     eval_results = state.get("eval_results") or {}
+    project_paths = get_project_paths(
+        project_name=state.get("project_name"),
+        repo_path=state.get("repo_path"),
+    )
 
     # --- Deterministic checks ---
     deterministic_verdict = _run_deterministic_checks(eval_results, plan)
@@ -71,7 +74,8 @@ def validate_node(state: dict[str, Any]) -> dict[str, Any]:
     }
 
     # --- Save validation results ---
-    _save_validation(task_id, full_eval)
+    _save_validation(task_id, full_eval, str(project_paths.tasks_dir), str(project_paths.db_path))
+    _save_community_feedback(state, full_eval, final_status)
 
     # Handle retries
     retries = state.get("retries", 0)
@@ -164,7 +168,7 @@ def _invoke_reviewer(
 ) -> dict[str, Any]:
     """Invoke the Reviewer agent backed by real dependencies."""
 
-    worktree_path = state.get("worktree_path", ".")
+    worktree_path = state.get("worktree_path") or state.get("repo_path") or "."
     llm_router = LLMRouter()
     reviewer = ReviewerAgent(worktree_path=worktree_path, llm_router=llm_router)
 
@@ -220,11 +224,17 @@ def _determine_status(
     return "done"
 
 
-def _save_validation(task_id: str, eval_results: dict[str, Any]) -> None:
+def _save_validation(
+    task_id: str,
+    eval_results: dict[str, Any],
+    tasks_dir: str,
+    db_path: str,
+) -> None:
     """Persist validation results to the task directory and SQLiteStore."""
+    import os
 
     # File-based persistence
-    evals_dir = os.path.join(".harness", "tasks", task_id, "evals")
+    evals_dir = os.path.join(tasks_dir, task_id, "evals")
     os.makedirs(evals_dir, exist_ok=True)
 
     try:
@@ -235,7 +245,7 @@ def _save_validation(task_id: str, eval_results: dict[str, Any]) -> None:
 
     # SQLiteStore persistence
     try:
-        store = SQLiteStore(_DB_PATH)
+        store = SQLiteStore(db_path)
         det = eval_results.get("deterministic_verdict", {})
         store.record_eval(
             task_id=task_id,
@@ -256,3 +266,20 @@ def _save_validation(task_id: str, eval_results: dict[str, Any]) -> None:
         store.close()
     except Exception:
         logger.debug("Failed to persist eval results to SQLite for %s", task_id, exc_info=True)
+
+
+def _save_community_feedback(
+    state: dict[str, Any],
+    eval_results: dict[str, Any],
+    final_status: str,
+) -> None:
+    """Persist a repo-agnostic validation record for harness-level learning."""
+    try:
+        event = build_feedback_event(state, eval_results, final_status)
+        append_feedback_event(event)
+    except Exception:
+        logger.debug(
+            "Failed to persist community feedback for %s",
+            state.get("task_id"),
+            exc_info=True,
+        )

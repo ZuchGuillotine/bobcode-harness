@@ -72,12 +72,17 @@ claude auth login
 
 ```bash
 harness-ctl register /path/to/your/project
+# Explicit degraded mode if codegraph is temporarily unavailable:
+# harness-ctl register /path/to/your/project --skip-codegraph
 ```
 
-This creates:
-- `AGENTS.md` in the project root (project metadata for agents)
-- `.harness/` directory for project-specific state (add to `.gitignore`)
-- Codegraph dependency graph (`.codegraph/graph.db`)
+By default registration:
+- Builds the repo-local codegraph at `.codegraph/graph.db`
+- Creates per-project harness state under `data/projects/<project>/...`
+- In `external` mode, keeps `.codegraph/` untracked via `.git/info/exclude`
+- In `assisted` mode, can create `AGENTS.md` and update `.gitignore`
+
+`codegraph` is on by default because it is the main low-token retrieval primitive for planner, worker, and reviewer. `--skip-codegraph` is an explicit degraded-mode escape hatch, not the normal path.
 
 ### 4. Submit a Task
 
@@ -115,6 +120,7 @@ agent-harness/                    ← Installed once on your VPS
 │       ├── my-app.yaml
 │       └── marketing-site.yaml
 └── data/
+    ├── community/                ← Share-safe feedback log + export bundles
     └── projects/                 ← Per-project state (isolated)
         ├── my-app/
         │   ├── tasks/            ← Task history
@@ -125,28 +131,31 @@ agent-harness/                    ← Installed once on your VPS
             ├── sqlite/
             └── learning/
 
-~/projects/my-app/                ← Your project (untouched)
-├── AGENTS.md                     ← Project metadata for agents
-├── .codegraph/graph.db           ← Dependency graph (gitignored)
-├── .gitignore                    ← Includes .codegraph/, .harness/
+~/projects/my-app/                ← Your project (tracked files stay clean in external mode)
+├── AGENTS.md                     ← Project metadata for agents (assisted mode)
+├── .codegraph/graph.db           ← Dependency graph (machine-generated)
+├── .git/info/exclude             ← External mode ignore entry for .codegraph/
+├── .gitignore                    ← Assisted mode can add .codegraph/
 └── src/                          ← Your code
 ```
 
 ### Key Principles
 
-1. **Your project repo stays clean.** The harness writes only `AGENTS.md` (committed) and `.codegraph/` (gitignored) to your project. All task state, learning data, and eval results live in the harness's `data/projects/` directory.
+1. **External mode keeps tracked files clean.** The harness stores task state, learning data, eval outputs, and export bundles under its own `data/` directory. The one default repo-local artifact is `.codegraph/`, which external mode keeps untracked via `.git/info/exclude`.
 
-2. **Per-project isolation.** Each project gets its own SQLite database, task history, learning data, and codegraph. Improvements learned from project A don't leak into project B unless you explicitly share skills.
+2. **Codegraph is part of the normal path.** Registration builds codegraph immediately because repo-intel is the main mechanism for reducing token use and improving retrieval accuracy. If you skip it, you are choosing degraded planning/execution.
 
-3. **Per-project config.** Override model routing, budget limits, skills, and prompts per project. A high-stakes production repo might use Opus for all roles; a side project might use only GPT-5.4-mini.
+3. **Per-project isolation.** Each project gets its own SQLite database, task history, learning data, eval outputs, and worktrees. Improvements learned from project A don't leak into project B unless you explicitly share them.
 
-4. **Base skills + project skills.** The harness ships with base skills (safe_refactor, bug_trace, review_diff). Projects can define additional skills in `AGENTS.md` or in a `skills/` directory within the project repo.
+4. **Per-project config.** Override model routing, budget limits, skills, and prompts per project. A high-stakes production repo might use Opus for all roles; a side project might use only GPT-5.4-mini.
 
-5. **Worktrees for safety.** The harness never modifies your main branch directly. All changes happen in isolated git worktrees. You review and merge.
+5. **Base skills + project skills.** The harness ships with base skills (safe_refactor, bug_trace, review_diff). Projects can define additional skills in `AGENTS.md` or in a `skills/` directory within the project repo.
+
+6. **Worktrees for safety.** The harness never modifies your main branch directly. All changes happen in isolated git worktrees. You review and merge.
 
 ### AGENTS.md
 
-Every managed project has an `AGENTS.md` at its root. This is the contract between your project and the harness:
+In `assisted` mode, a managed project can have an `AGENTS.md` at its root. This is the contract between your project and the harness. In `external` mode, the harness can operate without creating it.
 
 ```markdown
 # AGENTS.md
@@ -294,6 +303,23 @@ Every task outcome is classified into one of four failure buckets:
 
 This data accumulates in each project's SQLite database. The harness uses it to adjust confidence thresholds and skill selection for that project.
 
+In parallel, validation emits a share-safe summary event to `data/community/feedback_events.jsonl`. These events intentionally exclude project names, repo paths, file paths, and code content.
+
+If an operator wants to contribute those anonymized signals back upstream, the flow is explicit:
+
+```bash
+# Inspect current consent/export status
+harness-ctl feedback status
+
+# Opt in to exporting anonymized bundles
+harness-ctl feedback consent anonymized_export
+
+# Write an export bundle for upstream sharing
+harness-ctl feedback export
+```
+
+The export flow is manual-first on purpose: the harness records consent, tracks what has already been exported, and writes JSON bundles under `data/community/exports/`.
+
 **Level 2 — Cross-Project Pattern Detection (semi-automatic)**
 
 When the same failure pattern appears across multiple projects, it's likely a systemic skill or prompt issue — not a project-specific problem.
@@ -399,6 +425,12 @@ There are three ways to contribute to the harness:
 The most valuable contributions come from real usage. When you run the harness on your projects, it generates failure data that can improve the base skills for everyone.
 
 ```bash
+# Opt in to anonymized sharing first
+harness-ctl feedback consent anonymized_export
+
+# Export a bundle of share-safe feedback events
+harness-ctl feedback export
+
 # After running the harness on your projects for a while:
 harness-ctl analyze-failures --cross-project --since 30d
 
@@ -412,7 +444,7 @@ harness-ctl propose-improvement --pattern "pattern_name"
 # - Holdout test results
 ```
 
-Submit the generated PR. Your failure data is anonymized — no project names, file paths, or code content are included. Only the failure pattern, category, and skill metadata.
+Submit the generated PR or exported feedback bundle. Sharing is opt-in. The exported data is anonymized — no project names, repo paths, file paths, or code content are included. Only share-safe outcome and skill metadata are exported.
 
 ### 2. Add Skills
 

@@ -154,7 +154,7 @@ class PlannerAgent:
     ) -> None:
         self.role = "planner"
         self.repo_path = repo_path
-        self._codegraph = CodegraphAdapter()
+        self._codegraph = CodegraphAdapter(repo_path=self.repo_path)
         self._prompt_loader = PromptLoader()
         self._llm_router = llm_router or LLMRouter()
         self._system_prompt = self._load_prompt()

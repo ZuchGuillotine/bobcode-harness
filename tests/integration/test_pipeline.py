@@ -7,6 +7,7 @@ and state transitions.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -49,23 +50,22 @@ class TestIntakeNode:
 
     @patch("apps.orchestrator.stages.intake.TaskRouter")
     @patch("apps.orchestrator.stages.intake.SQLiteStore")
-    def test_intake_node(self, MockStore: MagicMock, MockRouter: MagicMock, tmp_path: str) -> None:
+    def test_intake_node(self, MockStore: MagicMock, MockRouter: MagicMock, tmp_path: Path) -> None:
         """Intake assigns a task ID, creates a directory, and transitions to 'planning'."""
         from apps.orchestrator.stages.intake import intake_node
 
         MockRouter.return_value.classify_task.return_value = "code_change"
         mock_store_instance = MagicMock()
         MockStore.return_value = mock_store_instance
+        repo_path = tmp_path / "demo-repo"
+        repo_path.mkdir()
 
-        # Patch the HARNESS_DIR and TASKS_DIR to use tmp_path
-        with patch("apps.orchestrator.stages.intake.HARNESS_DIR", str(tmp_path / ".harness")), \
-             patch("apps.orchestrator.stages.intake.TASKS_DIR", str(tmp_path / ".harness" / "tasks")), \
-             patch("apps.orchestrator.stages.intake._COUNTER_FILE", str(tmp_path / ".harness" / ".task_counter")):
-
+        with patch.dict(os.environ, {"HARNESS_DATA": str(tmp_path / "data")}, clear=False):
             state: dict[str, Any] = {
                 "task_id": "",
                 "task_type": "code_change",
                 "domain": "",
+                "repo_path": str(repo_path),
                 "description": "Fix the login endpoint returning 500",
                 "status": "intake",
                 "plan": None,
@@ -101,6 +101,11 @@ class TestIntakeNode:
 
         # Budget defaults should be populated
         assert result["budget"]["max_tokens"] == 500_000
+
+        # Task directory should live under the external project data dir
+        task_dir = tmp_path / "data" / "projects" / repo_path.name / "tasks" / result["task_id"]
+        assert task_dir.is_dir()
+        assert (task_dir / "manifest.json").is_file()
 
     def test_intake_node_empty_description(self) -> None:
         """Intake with empty description returns failed status."""
@@ -235,3 +240,47 @@ class TestPlanNodeLowConfidence:
         result = plan_node(state)
         assert result["status"] == "failed"
         assert "budget" in result["error"].lower()
+
+    @patch("apps.orchestrator.stages.plan.PlannerAgent")
+    @patch("apps.orchestrator.stages.plan.budget_enforcer")
+    def test_plan_node_passes_repo_path_to_planner(
+        self, mock_budget: MagicMock, MockPlannerAgent: MagicMock, tmp_path: Path
+    ) -> None:
+        """Plan node should construct the planner with the task's repo path."""
+        from apps.orchestrator.stages.plan import plan_node
+
+        repo_path = tmp_path / "demo-repo"
+        repo_path.mkdir()
+        mock_budget.check_budget.return_value = True
+        mock_budget.get_remaining.return_value = {
+            "tokens_remaining": 500_000,
+            "cost_remaining_usd": 5.00,
+        }
+
+        mock_planner_instance = MagicMock()
+        mock_planner_instance.plan = AsyncMock(return_value={
+            "task_id": "TASK-REPO",
+            "task_type": "code_change",
+            "plan_steps": [{"step": 1, "action": "Inspect", "target": "foo.py", "rationale": "Understand"}],
+            "selected_skill": "skill-code-change-v1",
+            "estimated_budget_tokens": 1000,
+            "confidence": 0.9,
+        })
+        MockPlannerAgent.return_value = mock_planner_instance
+
+        with patch.dict(os.environ, {"HARNESS_DATA": str(tmp_path / "data")}, clear=False):
+            state: dict[str, Any] = {
+                "task_id": "TASK-REPO",
+                "task_type": "code_change",
+                "repo_path": str(repo_path),
+                "description": "Inspect the repo",
+                "status": "planning",
+                "budget": {"max_tokens": 500_000, "max_cost_usd": 5.00},
+                "retries": 0,
+                "max_retries": 3,
+            }
+            result = plan_node(state)
+
+        assert result["status"] == "executing"
+        MockPlannerAgent.assert_called_once()
+        assert MockPlannerAgent.call_args.kwargs["repo_path"] == str(repo_path)

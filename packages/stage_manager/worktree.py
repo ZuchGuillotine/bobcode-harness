@@ -9,15 +9,18 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_WORKTREE_BASE = ".harness/worktrees"
-
 
 class WorktreeManager:
     """Create and manage git worktrees for parallel task execution."""
 
-    def __init__(self, repo_path: str = ".") -> None:
+    def __init__(self, repo_path: str = ".", worktree_base: str | None = None) -> None:
+        from packages.config import get_project_paths
+
         self._repo = Path(repo_path).resolve()
-        self._base = self._repo / _WORKTREE_BASE
+        if worktree_base is None:
+            self._base = get_project_paths(repo_path=str(self._repo)).worktree_base
+        else:
+            self._base = Path(worktree_base).resolve()
         self._base.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -65,6 +68,8 @@ class WorktreeManager:
         # git worktree remove
         cmd = [
             "git",
+            "-C",
+            str(self._repo),
             "worktree",
             "remove",
             str(wt_path),

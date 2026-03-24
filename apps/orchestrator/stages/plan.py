@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from typing import Any
 
 from apps.orchestrator.agents.planner import PlannerAgent
 from apps.orchestrator.budget import budget_enforcer
+from packages.config import get_project_paths
 from packages.llm.router import LLMRouter
 from packages.state.task_state import TaskStateManager
 
@@ -73,7 +73,11 @@ def plan_node(state: dict[str, Any]) -> dict[str, Any]:
         }
 
     # --- Invoke Planner ---
-    repo_path = state.get("repo_path", os.environ.get("HARNESS_REPO_PATH", "."))
+    project_paths = get_project_paths(
+        project_name=state.get("project_name"),
+        repo_path=state.get("repo_path"),
+    )
+    repo_path = str(project_paths.repo_path) if project_paths.repo_path else "."
     llm_router = LLMRouter()
     planner = PlannerAgent(repo_path=repo_path, llm_router=llm_router)
 
@@ -131,7 +135,7 @@ def plan_node(state: dict[str, Any]) -> dict[str, Any]:
         # Don't fail — let budget_enforcer kill it during execution if needed
 
     # --- Persist plan to task directory ---
-    _save_plan(task_id, plan)
+    _save_plan(task_id, plan, str(project_paths.tasks_dir))
 
     logger.info(
         "Plan complete for %s: %d steps, confidence=%.2f, est_tokens=%d",
@@ -149,14 +153,16 @@ def plan_node(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _save_plan(task_id: str, plan: dict[str, Any]) -> None:
+def _save_plan(task_id: str, plan: dict[str, Any], tasks_dir: str) -> None:
     """Write the plan to the task directory for traceability via TaskStateManager."""
     try:
-        tsm = TaskStateManager()
+        tsm = TaskStateManager(tasks_dir=tasks_dir)
         tsm.write_plan(task_id, plan)
     except Exception:
+        import os
+
         # Fallback to direct file write
-        task_dir = os.path.join(".harness", "tasks", task_id)
+        task_dir = os.path.join(tasks_dir, task_id)
         if os.path.isdir(task_dir):
             plan_path = os.path.join(task_dir, "plan.json")
             try:

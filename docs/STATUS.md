@@ -6,6 +6,14 @@
 
 ---
 
+## Tracking Policy
+
+- `docs/STATUS.md` is the public, tracked status document. Keep it limited to shipped behavior, repo-wide plans, and public-facing gaps.
+- `.local/STATUS.md` is the local-only operator log for private pilot history, exact test runs, repo-specific notes, and non-public validation detail.
+- When behavior changes locally but is not yet well-verified, record the experiment in `.local/STATUS.md` first, then promote the validated result into this document.
+
+---
+
 ## What's Done
 
 ### Core Orchestrator (`apps/orchestrator/`)
@@ -20,7 +28,7 @@
 - [x] `stages/learn.py` — Failure classification, skill usage tracking, SQLite persistence
 - [x] `budget.py` — Cost ceiling enforcement
 - [x] `task_router.py` — Task classification and skill routing
-- [x] `cli.py` — `harness-ctl` (submit, status, budget, list, approve, reject, register, projects)
+- [x] `cli.py` — `harness-ctl` (submit, status, budget, list, approve, reject, register, projects, feedback)
 
 ### Packages
 - [x] `packages/llm/router.py` — Model routing with fallback, rate limit retry (exponential backoff), cost tracking
@@ -29,11 +37,14 @@
 - [x] `packages/state/sqlite_store.py` — Full CRUD (tasks, evals, failures, metrics, skill usage)
 - [x] `packages/state/task_state.py` — File-based task directory management
 - [x] `packages/repo_intel/codegraph_adapter.py` — codegraph CLI wrapper (connected to agents, backed by optave v3.3.1)
+- [x] `packages/repo_intel/codegraph_manager.py` — registration-time codegraph build/provisioning helpers
 - [x] `packages/repo_intel/agents_md.py` — AGENTS.md parser/injector
 - [x] `packages/stage_manager/worktree.py` — Git worktree lifecycle
 - [x] `packages/stage_manager/tmux.py` — tmux session management
 - [x] `packages/eval/deterministic.py` — Schema, tests, boundaries, blast radius, budget checks
-- [x] `packages/eval/promptfoo_runner.py` — Promptfoo CLI wrapper
+- [x] `packages/eval/promptfoo_runner.py` — Promptfoo CLI wrapper with project-aware external eval output paths
+- [x] `packages/learning/community_feedback.py` — Harness-level, repo-agnostic feedback event log for cross-project improvement analysis
+- [x] `packages/learning/community_exchange.py` — Consent/status/export helpers for upstream community feedback sharing
 - [x] `packages/notifications/telegram_bot.py` — Full bot with commands + inline buttons
 - [x] `packages/notifications/formatters.py` — MarkdownV2 message formatting
 
@@ -63,7 +74,8 @@
 - [x] `LICENSE` — Apache 2.0
 - [x] `harness-ctl register` — Auto-creates AGENTS.md, builds codegraph, creates per-project data dirs
 - [x] `harness-ctl projects` — List registered projects
-- [x] Per-project isolation (separate SQLite, learning data, config overrides, codegraph per repo)
+- [x] `harness-ctl feedback` — Consent, status, and export flow for anonymized community feedback bundles
+- [x] Per-project isolation (separate SQLite, learning data, eval outputs, worktrees, config overrides; codegraph builds by default and is kept untracked via `.gitignore` or `.git/info/exclude`)
 
 ### Tests (60 passing)
 - [x] `tests/unit/test_sqlite_store.py` — 10 tests

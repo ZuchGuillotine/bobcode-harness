@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from typing import Any
 
 from apps.orchestrator.agents.worker import WorkerAgent
 from apps.orchestrator.budget import budget_enforcer
+from packages.config import get_project_paths
 from packages.llm.router import LLMRouter
+from packages.state.sqlite_store import SQLiteStore
 from packages.stage_manager.worktree import WorktreeManager
 
 logger = logging.getLogger(__name__)
@@ -47,15 +48,24 @@ def execute_node(state: dict[str, Any]) -> dict[str, Any]:
         }
 
     # --- Resolve worktree via WorktreeManager ---
-    repo_path = state.get("repo_path", os.environ.get("HARNESS_REPO_PATH", "."))
+    project_paths = get_project_paths(
+        project_name=state.get("project_name"),
+        repo_path=state.get("repo_path"),
+    )
+    repo_path = str(project_paths.repo_path) if project_paths.repo_path else "."
     branch = state.get("branch", f"harness/{task_id}")
-    wt_manager = WorktreeManager(repo_path=repo_path)
+    wt_manager = WorktreeManager(
+        repo_path=repo_path,
+        worktree_base=str(project_paths.worktree_base),
+    )
 
     try:
         worktree_path = str(wt_manager.create(repo_path, task_id, branch))
     except Exception as exc:
         logger.warning("WorktreeManager.create failed, falling back to directory: %s", exc)
-        worktree_path = _resolve_worktree(task_id)
+        worktree_path = _resolve_worktree(task_id, str(project_paths.worktree_base))
+
+    _persist_runtime_metadata(str(project_paths.db_path), task_id, branch, worktree_path)
 
     # --- Invoke Worker ---
     llm_router = LLMRouter()
@@ -92,7 +102,7 @@ def execute_node(state: dict[str, Any]) -> dict[str, Any]:
     summary = result.get("summary", "")
 
     # --- Save artifacts ---
-    _save_artifacts(task_id, artifacts)
+    _save_artifacts(task_id, artifacts, str(project_paths.tasks_dir))
 
     # --- Local validation (lightweight) ---
     local_issues = _run_local_validation(artifacts, plan)
@@ -108,6 +118,8 @@ def execute_node(state: dict[str, Any]) -> dict[str, Any]:
     return {
         **state,
         "status": "validating",
+        "branch": branch,
+        "worktree_path": worktree_path,
         "artifacts": artifacts,
         "eval_results": {
             "worker_summary": summary,
@@ -118,28 +130,25 @@ def execute_node(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _resolve_worktree(task_id: str) -> str:
+def _resolve_worktree(task_id: str, worktree_base: str) -> str:
     """Resolve the worktree path for a task.
 
     In MVP, use the task directory. In production, this would create a
     proper git worktree via the stage_manager.
     """
+    import os
 
-    # Try to use configured worktree base
-    worktree_base = os.environ.get(
-        "HARNESS_WORKTREE_BASE",
-        os.path.join(".harness", "worktrees"),
-    )
     worktree_path = os.path.join(worktree_base, task_id)
     os.makedirs(worktree_path, exist_ok=True)
 
     return worktree_path
 
 
-def _save_artifacts(task_id: str, artifacts: list[dict[str, Any]]) -> None:
+def _save_artifacts(task_id: str, artifacts: list[dict[str, Any]], tasks_dir: str) -> None:
     """Persist artifacts to the task directory."""
+    import os
 
-    artifact_dir = os.path.join(".harness", "tasks", task_id, "artifacts")
+    artifact_dir = os.path.join(tasks_dir, task_id, "artifacts")
     os.makedirs(artifact_dir, exist_ok=True)
 
     for i, artifact in enumerate(artifacts):
@@ -161,6 +170,24 @@ def _save_artifacts(task_id: str, artifacts: list[dict[str, Any]]) -> None:
             json.dump(manifest, f, indent=2)
     except OSError:
         pass
+
+
+def _persist_runtime_metadata(
+    db_path: str,
+    task_id: str,
+    branch: str,
+    worktree_path: str,
+) -> None:
+    """Persist branch/worktree metadata for the active task."""
+    try:
+        store = SQLiteStore(db_path)
+        store.update_task(task_id, {
+            "branch": branch,
+            "worktree_path": worktree_path,
+        })
+        store.close()
+    except Exception:
+        logger.debug("Failed to persist runtime metadata for %s", task_id, exc_info=True)
 
 
 def _run_local_validation(

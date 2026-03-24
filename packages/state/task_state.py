@@ -1,4 +1,4 @@
-"""Filesystem-backed task state management under .harness/tasks/."""
+"""Filesystem-backed task state management for task directories."""
 
 from __future__ import annotations
 
@@ -19,9 +19,17 @@ _SUBDIRS = ("artifacts", "logs", "patches", "evals")
 class TaskStateManager:
     """Manages per-task directories and JSON state files."""
 
-    def __init__(self, root: str = ".") -> None:
+    def __init__(self, root: str = ".", tasks_dir: str | None = None) -> None:
         self._root = Path(root).resolve()
-        self._base = self._root / _HARNESS_DIR / _TASKS_DIR
+        if tasks_dir is None:
+            if root == ".":
+                from packages.config import get_project_paths
+
+                self._base = get_project_paths().tasks_dir
+            else:
+                self._base = self._root / _HARNESS_DIR / _TASKS_DIR
+        else:
+            self._base = Path(tasks_dir).resolve()
         self._base.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------

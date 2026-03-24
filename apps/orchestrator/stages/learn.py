@@ -4,26 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Any
 
+from packages.config import get_project_paths
+from packages.learning.failure_classification import FAILURE_CLASSES, classify_failure
 from packages.state.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
-
-_DB_PATH = os.environ.get("HARNESS_DB_PATH", os.path.join(".harness", "harness.db"))
-
-# Failure classification taxonomy
-FAILURE_CLASSES = {
-    "plan_quality": "Planner produced a low-confidence or invalid plan",
-    "execution_error": "Worker encountered an error during execution",
-    "test_failure": "Tests did not pass after execution",
-    "boundary_violation": "Changes touched out-of-scope files",
-    "review_rejected": "Reviewer rejected the changes",
-    "budget_exceeded": "Task exceeded its budget ceiling",
-    "unknown": "Failure cause could not be determined",
-}
 
 
 def learn_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -36,9 +24,13 @@ def learn_node(state: dict[str, Any]) -> dict[str, Any]:
     eval_results = state.get("eval_results") or {}
     plan = state.get("plan") or {}
     status = state.get("status", "")
+    project_paths = get_project_paths(
+        project_name=state.get("project_name"),
+        repo_path=state.get("repo_path"),
+    )
 
     # --- Classify failure ---
-    failure_class = _classify_failure(state, eval_results)
+    failure_class = classify_failure(state, eval_results)
 
     # --- Build learning record ---
     record = {
@@ -57,10 +49,10 @@ def learn_node(state: dict[str, Any]) -> dict[str, Any]:
     }
 
     # --- Store learning record ---
-    _save_learning_record(task_id, record)
+    _save_learning_record(task_id, record, project_paths)
 
     # --- Update skill usage tracking ---
-    _update_skill_tracking(record)
+    _update_skill_tracking(record, project_paths)
 
     logger.info(
         "Learn complete for %s: class=%s, skill=%s",
@@ -73,45 +65,6 @@ def learn_node(state: dict[str, Any]) -> dict[str, Any]:
         **state,
         "status": "learned",
     }
-
-
-def _classify_failure(state: dict[str, Any], eval_results: dict[str, Any]) -> str:
-    """Determine the root cause category for a non-successful task."""
-
-    error = state.get("error", "")
-
-    # Budget exceeded
-    if error and "budget" in error.lower():
-        return "budget_exceeded"
-
-    # Check for boundary violations
-    local_issues = eval_results.get("local_issues", [])
-    if any(i.get("check") == "out_of_scope_change" for i in local_issues):
-        return "boundary_violation"
-
-    # Reviewer rejection
-    review = eval_results.get("review_verdict")
-    if review and review.get("verdict") == "rejected":
-        return "review_rejected"
-
-    # Test failures
-    if not eval_results.get("tests_passed", True):
-        return "test_failure"
-
-    # Execution errors
-    if error and "worker" in error.lower():
-        return "execution_error"
-
-    # Plan quality issues
-    plan = state.get("plan") or {}
-    if plan.get("confidence", 1.0) < 0.3:
-        return "plan_quality"
-    if error and "plan" in error.lower():
-        return "plan_quality"
-
-    return "unknown"
-
-
 def _summarise_evals(eval_results: dict[str, Any]) -> dict[str, Any]:
     """Create a compact summary of eval results for the learning record."""
 
@@ -138,11 +91,12 @@ def _summarise_evals(eval_results: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
-def _save_learning_record(task_id: str, record: dict[str, Any]) -> None:
+def _save_learning_record(task_id: str, record: dict[str, Any], project_paths: Any) -> None:
     """Persist the learning record to filesystem and SQLiteStore."""
+    import os
 
     # Save to task directory
-    task_dir = os.path.join(".harness", "tasks", task_id, "evals")
+    task_dir = os.path.join(str(project_paths.tasks_dir), task_id, "evals")
     os.makedirs(task_dir, exist_ok=True)
 
     try:
@@ -152,7 +106,7 @@ def _save_learning_record(task_id: str, record: dict[str, Any]) -> None:
         logger.warning("Failed to save learning record for %s", task_id)
 
     # Append to global learning log
-    log_dir = os.path.join(".harness", "learning")
+    log_dir = str(project_paths.learning_dir)
     os.makedirs(log_dir, exist_ok=True)
 
     log_path = os.path.join(log_dir, "failures.jsonl")
@@ -164,7 +118,7 @@ def _save_learning_record(task_id: str, record: dict[str, Any]) -> None:
 
     # Persist failure to SQLiteStore
     try:
-        store = SQLiteStore(_DB_PATH)
+        store = SQLiteStore(str(project_paths.db_path))
         failure_class = record.get("failure_class", "unknown")
         if failure_class != "unknown" or record.get("final_status") not in ("done", "learned"):
             store.record_failure(
@@ -179,8 +133,9 @@ def _save_learning_record(task_id: str, record: dict[str, Any]) -> None:
         logger.debug("Failed to persist failure to SQLite for %s", task_id, exc_info=True)
 
 
-def _update_skill_tracking(record: dict[str, Any]) -> None:
+def _update_skill_tracking(record: dict[str, Any], project_paths: Any) -> None:
     """Update skill usage via SQLiteStore and legacy JSON file."""
+    import os
 
     skill_id = record.get("selected_skill", "")
     if not skill_id:
@@ -192,7 +147,7 @@ def _update_skill_tracking(record: dict[str, Any]) -> None:
 
     # Persist to SQLiteStore
     try:
-        store = SQLiteStore(_DB_PATH)
+        store = SQLiteStore(str(project_paths.db_path))
         store.record_skill_usage(
             task_id=task_id,
             skill_id=skill_id,
@@ -207,7 +162,7 @@ def _update_skill_tracking(record: dict[str, Any]) -> None:
         logger.debug("Failed to persist skill usage to SQLite for %s", task_id, exc_info=True)
 
     # Legacy JSON-based tracking
-    tracking_dir = os.path.join(".harness", "skills")
+    tracking_dir = str(project_paths.skills_dir)
     os.makedirs(tracking_dir, exist_ok=True)
     tracking_path = os.path.join(tracking_dir, "usage.json")
 

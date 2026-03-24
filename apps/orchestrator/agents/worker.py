@@ -179,7 +179,7 @@ class WorkerAgent:
         self.worktree_path = os.path.realpath(worktree_path or ".")
         self._prompt_loader = PromptLoader()
         self._llm_router = llm_router or LLMRouter()
-        self._codegraph = CodegraphAdapter()
+        self._codegraph = CodegraphAdapter(repo_path=self.worktree_path)
         self._system_prompt = self._load_prompt()
 
     def _load_prompt(self) -> str:

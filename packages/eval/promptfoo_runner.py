@@ -31,19 +31,63 @@ class PromptfooRunner:
 
     def __init__(
         self,
-        config_dir: str = "evals",
-        output_dir: str = ".harness/eval_outputs",
-        timeout_seconds: int = 120,
+        config_dir: str | None = None,
+        output_dir: str | None = None,
+        timeout_seconds: int | None = None,
+        project_name: str | None = None,
+        repo_path: str | None = None,
     ) -> None:
-        self._config_dir = Path(config_dir)
-        self._output_dir = Path(output_dir)
+        from packages.config import get_harness_root, get_project_paths, load_eval_config
+
+        promptfoo_cfg = load_eval_config().get("eval", {}).get("promptfoo", {})
+        harness_root = get_harness_root()
+        project_paths = get_project_paths(project_name=project_name, repo_path=repo_path)
+
+        config_value = config_dir or promptfoo_cfg.get("config_dir") or "evals"
+        output_value = output_dir or promptfoo_cfg.get("output_dir")
+
+        self._config_dir = self._resolve_path(str(config_value), harness_root)
+        self._output_dir = self._resolve_output_dir(
+            output_value,
+            project_paths.eval_output_dir,
+            harness_root,
+        )
         self._output_dir.mkdir(parents=True, exist_ok=True)
-        self._timeout = timeout_seconds
+        configured_timeout = promptfoo_cfg.get("timeout_seconds")
+        self._timeout = timeout_seconds or int(configured_timeout or 120)
         self._npx_path = self._resolve_npx()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_path(value: str, base: Path) -> Path:
+        path = Path(value).expanduser()
+        if path.is_absolute():
+            return path.resolve()
+        return (base / path).resolve()
+
+    @classmethod
+    def _resolve_output_dir(
+        cls,
+        configured_output: str | None,
+        project_output_dir: Path,
+        harness_root: Path,
+    ) -> Path:
+        if not configured_output:
+            return project_output_dir
+
+        normalized = configured_output.strip().rstrip("/")
+        if normalized in {".harness/eval_outputs", "./.harness/eval_outputs"}:
+            logger.info(
+                "Ignoring legacy promptfoo output_dir=%s; using project eval output dir %s",
+                configured_output,
+                project_output_dir,
+            )
+            return project_output_dir
+
+        return cls._resolve_path(configured_output, harness_root)
 
     @staticmethod
     def _resolve_npx() -> str | None:

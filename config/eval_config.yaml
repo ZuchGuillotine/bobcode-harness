@@ -1,7 +1,8 @@
 eval:
   promptfoo:
     config_dir: evals
-    output_dir: .harness/eval_outputs
+    # Output defaults to the runtime project's external eval_output_dir.
+    # Set output_dir only if you intentionally want a harness-global location.
     default_provider: anthropic:messages:claude-sonnet-4-6
     timeout_seconds: 120
     max_concurrency: 3

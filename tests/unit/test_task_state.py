@@ -30,6 +30,25 @@ class TestCreateTaskDir:
         assert dir1 == dir2
         assert dir1.is_dir()
 
+    def test_default_root_uses_harness_runtime_tasks_dir(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Default construction should not write a repo-local .harness directory."""
+        harness_root = tmp_path / "harness"
+        (harness_root / "config").mkdir(parents=True)
+        (harness_root / "config" / "harness.yaml").write_text(
+            "harness:\n  data_dir: data\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HARNESS_HOME", str(harness_root))
+
+        manager = TaskStateManager()
+
+        assert manager._base == harness_root / ".harness" / "tasks"
+
 
 class TestWriteAndReadState:
     """Tests for state.json persistence."""

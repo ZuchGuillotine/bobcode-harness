@@ -6,39 +6,207 @@ import argparse
 import asyncio
 import json
 import os
+from pathlib import Path
+import subprocess
 import sys
 from typing import Any
 
+from packages.config import (
+    find_task_dir,
+    get_config_dir,
+    get_data_dir,
+    get_project_paths,
+    iter_registered_projects,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-TASKS_DIR = os.path.join(".harness", "tasks")
+def _iter_task_roots(project_name: str | None = None) -> list[tuple[str | None, Path]]:
+    """Return the task roots to search for task state."""
+    if project_name:
+        paths = get_project_paths(project_name=project_name)
+        return [(project_name, paths.tasks_dir)]
+
+    roots = [(name, get_project_paths(project_name=name).tasks_dir) for name, _ in iter_registered_projects()]
+    legacy = get_project_paths()
+    if legacy.tasks_dir.is_dir():
+        roots.append((None, legacy.tasks_dir))
+    return roots
 
 
-def _load_manifest(task_id: str) -> dict[str, Any] | None:
-    """Load the manifest for a task, or None if not found."""
-    path = os.path.join(TASKS_DIR, task_id, "manifest.json")
-    if not os.path.exists(path):
+def _load_task(
+    task_id: str,
+    project_name: str | None = None,
+) -> tuple[str | None, Path, dict[str, Any]] | None:
+    """Load a task manifest and return ``(project_name, task_dir, manifest)``."""
+    located = find_task_dir(task_id, project_name=project_name)
+    if not located:
         return None
-    with open(path) as f:
-        return json.load(f)
+
+    located_project, task_dir = located
+    manifest_path = task_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+
+    with manifest_path.open() as f:
+        manifest = json.load(f)
+
+    if located_project and not manifest.get("project_name"):
+        manifest["project_name"] = located_project
+
+    return located_project, task_dir, manifest
 
 
-def _list_tasks() -> list[str]:
-    """List all task IDs in the harness directory."""
-    if not os.path.isdir(TASKS_DIR):
-        return []
-    return sorted(
-        d for d in os.listdir(TASKS_DIR)
-        if os.path.isdir(os.path.join(TASKS_DIR, d)) and d.startswith("TASK-")
-    )
+def _list_tasks(project_name: str | None = None) -> list[tuple[str | None, str, dict[str, Any]]]:
+    """List all tasks across registered projects or a single project."""
+    tasks: list[tuple[str | None, str, dict[str, Any]]] = []
+    for name, tasks_dir in _iter_task_roots(project_name):
+        if not tasks_dir.is_dir():
+            continue
+        for task_dir in sorted(p for p in tasks_dir.iterdir() if p.is_dir() and p.name.startswith("TASK-")):
+            manifest_path = task_dir / "manifest.json"
+            manifest: dict[str, Any] = {}
+            if manifest_path.is_file():
+                with manifest_path.open() as f:
+                    manifest = json.load(f)
+            tasks.append((name, task_dir.name, manifest))
+    return tasks
+
+
+def _detect_repo_context(repo_path: str) -> dict[str, str]:
+    """Infer basic language/build/test/lint commands from the repo shape."""
+    language = "Unknown"
+    build_cmd = "# TODO"
+    test_cmd = "# TODO"
+    lint_cmd = "# TODO"
+
+    if os.path.exists(os.path.join(repo_path, "pyproject.toml")):
+        language = "Python"
+        build_cmd = "pip install -e ."
+        test_cmd = "pytest tests/"
+        lint_cmd = "ruff check ."
+    elif os.path.exists(os.path.join(repo_path, "package.json")):
+        language = "JavaScript/TypeScript"
+        build_cmd = "npm install"
+        test_cmd = "npm test"
+        lint_cmd = "npm run lint"
+    elif os.path.exists(os.path.join(repo_path, "go.mod")):
+        language = "Go"
+        build_cmd = "go build ./..."
+        test_cmd = "go test ./..."
+        lint_cmd = "golangci-lint run"
+    elif os.path.exists(os.path.join(repo_path, "Cargo.toml")):
+        language = "Rust"
+        build_cmd = "cargo build"
+        test_cmd = "cargo test"
+        lint_cmd = "cargo clippy"
+
+    return {
+        "language": language,
+        "build_cmd": build_cmd,
+        "test_cmd": test_cmd,
+        "lint_cmd": lint_cmd,
+    }
 
 
 def _print_json(data: Any) -> None:
     """Pretty-print a JSON-serialisable object."""
     print(json.dumps(data, indent=2, default=str))
+
+
+def _load_harness_yaml() -> tuple[Path, dict[str, Any]]:
+    """Load ``config/harness.yaml`` if present."""
+    import yaml
+
+    path = get_config_dir() / "harness.yaml"
+    if not path.is_file():
+        return path, {}
+    with path.open() as fh:
+        return path, yaml.safe_load(fh) or {}
+
+
+def _save_harness_yaml(path: Path, data: dict[str, Any]) -> None:
+    """Persist ``config/harness.yaml``."""
+    import yaml
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as fh:
+        yaml.safe_dump(data, fh, default_flow_style=False, sort_keys=False)
+
+
+def _upsert_lines(path: Path, entries: list[str]) -> list[str]:
+    """Append ignore entries if missing and return newly-added lines."""
+    existing_lines: list[str] = []
+    if path.exists():
+        existing_lines = path.read_text(encoding="utf-8").splitlines()
+
+    added: list[str] = []
+    for entry in entries:
+        if entry not in existing_lines:
+            existing_lines.append(entry)
+            added.append(entry)
+
+    if added:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(existing_lines) + "\n", encoding="utf-8")
+
+    return added
+
+
+def _ensure_codegraph_ignore(repo_path: Path, mode: str) -> tuple[Path, list[str]]:
+    """Keep repo-local codegraph artifacts out of version control."""
+    ignore_path = (
+        repo_path / ".gitignore" if mode == "assisted"
+        else repo_path / ".git" / "info" / "exclude"
+    )
+    added = _upsert_lines(ignore_path, [".codegraph/"])
+    return ignore_path, added
+
+
+def _build_agents_md(project_name: str, repo_context: dict[str, str]) -> str:
+    """Return the default AGENTS.md template for assisted mode."""
+    return f"""# AGENTS.md
+
+## Project: {project_name}
+## Language: {repo_context["language"]}
+## Build: {repo_context["build_cmd"]}
+## Test: {repo_context["test_cmd"]}
+## Lint: {repo_context["lint_cmd"]}
+
+## Architecture
+<!-- Describe your project structure here -->
+
+## Boundaries
+<!-- Define module boundaries, e.g.: -->
+<!-- - models/ must not import from api/ -->
+<!-- - External API calls only in services/ -->
+
+## Conventions
+<!-- Naming conventions, error handling patterns, testing requirements -->
+
+## Known Issues
+<!-- Active bugs or tech debt -->
+
+## codegraph
+Graph at `.codegraph/graph.db`. Rebuild it after structural changes.
+Before modifying code:
+1. `codegraph where <symbol>` — find where it lives
+2. `codegraph context <symbol>` — check who calls it
+3. `codegraph fn-impact <symbol>` — check blast radius after changes
+"""
+
+
+def _is_git_repo(path: Path) -> bool:
+    """Return True when *path* is a git working tree."""
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
 
 
 # ---------------------------------------------------------------------------
@@ -51,16 +219,20 @@ def cmd_submit(args: argparse.Namespace) -> None:
 
     description = args.description
     task_type = args.type
+    project_name = args.project
 
     print(f"Submitting task: {description}")
     print(f"Type: {task_type}")
+    if project_name:
+        print(f"Project: {project_name}")
     print()
 
     try:
-        result = asyncio.run(run_task(description, task_type))
+        result = asyncio.run(run_task(description, task_type, project_name=project_name))
         print("Task completed.")
         _print_json({
             "task_id": result.get("task_id"),
+            "project_name": result.get("project_name"),
             "status": result.get("status"),
             "error": result.get("error"),
         })
@@ -75,39 +247,41 @@ def cmd_submit(args: argparse.Namespace) -> None:
 def cmd_status(args: argparse.Namespace) -> None:
     """Show the status of a task or all tasks."""
     if args.task_id:
-        manifest = _load_manifest(args.task_id)
-        if manifest is None:
+        task = _load_task(args.task_id, args.project)
+        if task is None:
             print(f"Task {args.task_id} not found.", file=sys.stderr)
             sys.exit(1)
+        project_name, task_dir, manifest = task
 
         # Also try to load validation results
-        eval_path = os.path.join(TASKS_DIR, args.task_id, "evals", "validation.json")
+        eval_path = task_dir / "evals" / "validation.json"
         eval_data = None
-        if os.path.exists(eval_path):
-            with open(eval_path) as f:
+        if eval_path.is_file():
+            with eval_path.open() as f:
                 eval_data = json.load(f)
 
         status_info = {
             **manifest,
+            "project_name": manifest.get("project_name") or project_name,
             "eval_results": eval_data,
         }
         _print_json(status_info)
     else:
         # Show all tasks
-        tasks = _list_tasks()
+        tasks = _list_tasks(args.project)
         if not tasks:
             print("No tasks found.")
             return
 
-        for tid in tasks:
-            manifest = _load_manifest(tid)
+        for project_name, task_id, manifest in tasks:
             if manifest:
                 print(
-                    f"  {tid}  type={manifest.get('task_type', '?'):20s}  "
+                    f"  {task_id}  project={(manifest.get('project_name') or project_name or 'legacy'):15s}  "
+                    f"type={manifest.get('task_type', '?'):20s}  "
                     f"created={manifest.get('created_at', '?')}"
                 )
             else:
-                print(f"  {tid}  (no manifest)")
+                print(f"  {task_id}  (no manifest)")
 
 
 def cmd_budget(args: argparse.Namespace) -> None:
@@ -128,40 +302,41 @@ def cmd_budget(args: argparse.Namespace) -> None:
 
 def cmd_list(args: argparse.Namespace) -> None:
     """List all tasks."""
-    tasks = _list_tasks()
+    tasks = _list_tasks(args.project)
     if not tasks:
         print("No tasks found.")
         return
 
-    print(f"{'Task ID':<12} {'Type':<22} {'Created'}")
-    print("-" * 60)
-    for tid in tasks:
-        manifest = _load_manifest(tid)
+    print(f"{'Task ID':<12} {'Project':<18} {'Type':<22} {'Created'}")
+    print("-" * 90)
+    for project_name, task_id, manifest in tasks:
         if manifest:
             print(
-                f"{tid:<12} {manifest.get('task_type', '?'):<22} "
+                f"{task_id:<12} {(manifest.get('project_name') or project_name or 'legacy'):<18} "
+                f"{manifest.get('task_type', '?'):<22} "
                 f"{manifest.get('created_at', '?')}"
             )
         else:
-            print(f"{tid:<12} {'?':<22} ?")
+            print(f"{task_id:<12} {(project_name or 'legacy'):<18} {'?':<22} ?")
 
 
 def cmd_approve(args: argparse.Namespace) -> None:
     """Approve a task (human-in-the-loop gate)."""
     task_id = args.task_id
-    manifest = _load_manifest(task_id)
-    if manifest is None:
+    task = _load_task(task_id, args.project)
+    if task is None:
         print(f"Task {task_id} not found.", file=sys.stderr)
         sys.exit(1)
+    _project_name, task_dir, _manifest = task
 
     # Write approval marker
-    approval_path = os.path.join(TASKS_DIR, task_id, "approved.json")
+    approval_path = task_dir / "approved.json"
     approval = {
         "task_id": task_id,
         "approved": True,
         "approved_by": "cli",
     }
-    with open(approval_path, "w") as f:
+    with approval_path.open("w") as f:
         json.dump(approval, f, indent=2)
 
     print(f"Task {task_id} approved.")
@@ -170,21 +345,22 @@ def cmd_approve(args: argparse.Namespace) -> None:
 def cmd_reject(args: argparse.Namespace) -> None:
     """Reject a task with a reason."""
     task_id = args.task_id
-    manifest = _load_manifest(task_id)
-    if manifest is None:
+    task = _load_task(task_id, args.project)
+    if task is None:
         print(f"Task {task_id} not found.", file=sys.stderr)
         sys.exit(1)
+    _project_name, task_dir, _manifest = task
 
     reason = args.reason or "No reason provided"
 
-    rejection_path = os.path.join(TASKS_DIR, task_id, "rejected.json")
+    rejection_path = task_dir / "rejected.json"
     rejection = {
         "task_id": task_id,
         "approved": False,
         "rejected_by": "cli",
         "reason": reason,
     }
-    with open(rejection_path, "w") as f:
+    with rejection_path.open("w") as f:
         json.dump(rejection, f, indent=2)
 
     print(f"Task {task_id} rejected: {reason}")
@@ -192,162 +368,128 @@ def cmd_reject(args: argparse.Namespace) -> None:
 
 def cmd_register(args: argparse.Namespace) -> None:
     """Register a project for harness management."""
-    import subprocess
-
     import yaml
+    from datetime import datetime, timezone
+
+    from packages.repo_intel.codegraph_manager import build_codegraph
 
     repo_path = os.path.abspath(args.path)
     project_name = args.name or os.path.basename(repo_path)
+    mode = args.mode
+    skip_codegraph = args.skip_codegraph
 
     if not os.path.isdir(repo_path):
         print(f"Directory not found: {repo_path}", file=sys.stderr)
         sys.exit(1)
 
+    repo_path_obj = Path(repo_path)
+    if not _is_git_repo(repo_path_obj):
+        print(f"Not a git repository: {repo_path}", file=sys.stderr)
+        sys.exit(1)
+
     print(f"Registering project: {project_name}")
     print(f"  Path: {repo_path}")
+    print(f"  Mode: {mode}")
+    print(f"  Codegraph: {'skip (degraded)' if skip_codegraph else 'required'}")
     print()
 
-    # 1. Create AGENTS.md if it doesn't exist
-    agents_md_path = os.path.join(repo_path, "AGENTS.md")
-    if not os.path.exists(agents_md_path):
-        # Detect language and build/test commands
-        language = "Unknown"
-        build_cmd = "# TODO"
-        test_cmd = "# TODO"
-        lint_cmd = "# TODO"
+    repo_context = _detect_repo_context(repo_path)
 
-        if os.path.exists(os.path.join(repo_path, "pyproject.toml")):
-            language = "Python"
-            build_cmd = "pip install -e ."
-            test_cmd = "pytest tests/"
-            lint_cmd = "ruff check ."
-        elif os.path.exists(os.path.join(repo_path, "package.json")):
-            language = "JavaScript/TypeScript"
-            build_cmd = "npm install"
-            test_cmd = "npm test"
-            lint_cmd = "npm run lint"
-        elif os.path.exists(os.path.join(repo_path, "go.mod")):
-            language = "Go"
-            build_cmd = "go build ./..."
-            test_cmd = "go test ./..."
-            lint_cmd = "golangci-lint run"
-        elif os.path.exists(os.path.join(repo_path, "Cargo.toml")):
-            language = "Rust"
-            build_cmd = "cargo build"
-            test_cmd = "cargo test"
-            lint_cmd = "cargo clippy"
-
-        agents_md = f"""# AGENTS.md
-
-## Project: {project_name}
-## Language: {language}
-## Build: {build_cmd}
-## Test: {test_cmd}
-## Lint: {lint_cmd}
-
-## Architecture
-<!-- Describe your project structure here -->
-
-## Boundaries
-<!-- Define module boundaries, e.g.: -->
-<!-- - models/ must not import from api/ -->
-<!-- - External API calls only in services/ -->
-
-## Conventions
-<!-- Naming conventions, error handling patterns, testing requirements -->
-
-## Known Issues
-<!-- Active bugs or tech debt -->
-
-## codegraph
-Graph at `.codegraph/graph.db`. Run `codegraph build` after structural changes.
-Before modifying code:
-1. `codegraph where <symbol>` — find where it lives
-2. `codegraph context <symbol>` — check who calls it
-3. `codegraph fn-impact <symbol>` — check blast radius after changes
-"""
-        with open(agents_md_path, "w") as f:
-            f.write(agents_md)
-        print(f"  Created: {agents_md_path}")
-    else:
-        print(f"  Found existing: {agents_md_path}")
-
-    # 2. Add .codegraph/ and .harness/ to project .gitignore
-    gitignore_path = os.path.join(repo_path, ".gitignore")
-    entries_to_add = [".codegraph/", ".harness/"]
-    existing_lines: list[str] = []
-    if os.path.exists(gitignore_path):
-        with open(gitignore_path) as f:
-            existing_lines = f.read().splitlines()
-
-    added = []
-    for entry in entries_to_add:
-        if entry not in existing_lines:
-            existing_lines.append(entry)
-            added.append(entry)
-
-    if added:
-        with open(gitignore_path, "w") as f:
-            f.write("\n".join(existing_lines) + "\n")
-        print(f"  Updated .gitignore: added {', '.join(added)}")
-
-    # 3. Build codegraph
-    print("  Building codegraph...")
-    try:
-        result = subprocess.run(
-            ["codegraph", "build"],
-            cwd=repo_path,
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode == 0:
-            # Extract summary from output
-            for line in result.stderr.splitlines() + result.stdout.splitlines():
-                if "Graph built" in line or "nodes" in line:
-                    print(f"  {line.strip()}")
-                    break
-            else:
-                print("  Codegraph built successfully")
-        else:
-            print(f"  Codegraph build warning: {result.stderr[:200]}")
-    except FileNotFoundError:
-        print("  Codegraph not found — install with: npm install -g @optave/codegraph")
-    except subprocess.TimeoutExpired:
-        print("  Codegraph build timed out (large repo?) — run manually: cd {repo_path} && codegraph build")
-
-    # 4. Create per-project data directory
-    harness_data = os.environ.get("HARNESS_DATA", "data")
-    project_data = os.path.join(harness_data, "projects", project_name)
-    for subdir in ["tasks", "sqlite", "learning"]:
-        os.makedirs(os.path.join(project_data, subdir), exist_ok=True)
+    # 1. Create per-project data directory
+    project_data = get_data_dir() / "projects" / project_name
+    for subdir in ["tasks", "sqlite", "learning", "skills", "worktrees", "eval_outputs"]:
+        os.makedirs(project_data / subdir, exist_ok=True)
     print(f"  Project data: {project_data}")
 
+    # 2. Build codegraph by default unless explicitly skipped
+    codegraph_status = "skipped"
+    codegraph_message = "Codegraph build skipped by operator request"
+    codegraph_path = repo_path_obj / ".codegraph" / "graph.db"
+    if skip_codegraph:
+        print("  Skipping codegraph build (--skip-codegraph)")
+    else:
+        print("  Building codegraph...")
+        build_result = build_codegraph(repo_path_obj, timeout_seconds=args.codegraph_timeout)
+        codegraph_path = build_result.artifact_path
+        codegraph_message = build_result.message
+        if build_result.success:
+            codegraph_status = "ready"
+            print(f"  {build_result.message}")
+        else:
+            print(f"  {build_result.message}", file=sys.stderr)
+            print(
+                "  Registration aborted. Install/configure codegraph or rerun with --skip-codegraph for degraded mode.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    # 3. Keep repo-local codegraph artifacts untracked
+    ignore_path, added_entries = _ensure_codegraph_ignore(repo_path_obj, mode)
+    if added_entries:
+        target_name = ".gitignore" if mode == "assisted" else ".git/info/exclude"
+        print(f"  Updated {target_name}: added {', '.join(added_entries)}")
+    else:
+        target_name = ".gitignore" if mode == "assisted" else ".git/info/exclude"
+        print(f"  Found existing ignore entry in {target_name}")
+
+    # 4. Create AGENTS.md if it doesn't exist
+    agents_md_path = os.path.join(repo_path, "AGENTS.md")
+    if mode == "assisted" and not os.path.exists(agents_md_path):
+        with open(agents_md_path, "w") as f:
+            f.write(_build_agents_md(project_name, repo_context))
+        print(f"  Created: {agents_md_path}")
+    elif mode == "assisted":
+        print(f"  Found existing: {agents_md_path}")
+    else:
+        print("  External mode: leaving AGENTS.md untouched")
+
     # 5. Create per-project config
-    config_dir = os.environ.get("HARNESS_CONFIG", "config")
-    projects_config_dir = os.path.join(config_dir, "projects")
+    config_dir = get_config_dir()
+    projects_config_dir = config_dir / "projects"
     os.makedirs(projects_config_dir, exist_ok=True)
 
-    project_config_path = os.path.join(projects_config_dir, f"{project_name}.yaml")
-    if not os.path.exists(project_config_path):
-        project_config = {
-            "project": {
-                "name": project_name,
-                "repo_path": repo_path,
-                "registered_at": __import__("datetime").datetime.now().isoformat(),
-            },
-        }
-        with open(project_config_path, "w") as f:
-            yaml.dump(project_config, f, default_flow_style=False)
-        print(f"  Config: {project_config_path}")
+    project_config_path = projects_config_dir / f"{project_name}.yaml"
+    existing_registered_at: str | None = None
+    project_config: dict[str, Any] = {}
+    if project_config_path.exists():
+        with project_config_path.open() as f:
+            project_config = yaml.safe_load(f) or {}
+        existing_registered_at = (
+            project_config.get("project", {}).get("registered_at")
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+    project_config["project"] = {
+        "name": project_name,
+        "repo_path": repo_path,
+        "registered_at": existing_registered_at or now,
+        "updated_at": now,
+    }
+    project_config["registration"] = {
+        "mode": mode,
+        "codegraph_required": not skip_codegraph,
+        "codegraph_ignore_path": str(ignore_path),
+    }
+    project_config["repo_context"] = repo_context
+    project_config["codegraph"] = {
+        "status": codegraph_status,
+        "artifact_path": str(codegraph_path),
+        "last_checked_at": now,
+        "last_message": codegraph_message,
+        "build_mode": "automatic" if not skip_codegraph else "skipped",
+    }
+    if codegraph_status == "ready":
+        project_config["codegraph"]["last_built_at"] = now
+
+    with project_config_path.open("w") as f:
+        yaml.safe_dump(project_config, f, default_flow_style=False, sort_keys=False)
+    print(f"  Config: {project_config_path}")
 
     # 6. Register in harness.yaml
-    harness_config_path = os.path.join(config_dir, "harness.yaml")
-    if os.path.exists(harness_config_path):
-        with open(harness_config_path) as f:
-            cfg = yaml.safe_load(f) or {}
-        projects = cfg.setdefault("projects", {})
-        projects[project_name] = repo_path
-        with open(harness_config_path, "w") as f:
-            yaml.dump(cfg, f, default_flow_style=False)
+    harness_config_path, cfg = _load_harness_yaml()
+    projects = cfg.setdefault("projects", {})
+    projects[project_name] = repo_path
+    _save_harness_yaml(harness_config_path, cfg)
 
     print()
     print(f"Project '{project_name}' registered.")
@@ -356,28 +498,81 @@ Before modifying code:
 
 def cmd_projects(args: argparse.Namespace) -> None:
     """List registered projects."""
-    import yaml
-
-    config_dir = os.environ.get("HARNESS_CONFIG", "config")
-    harness_config_path = os.path.join(config_dir, "harness.yaml")
-
-    if not os.path.exists(harness_config_path):
-        print("No harness config found.")
-        return
-
-    with open(harness_config_path) as f:
-        cfg = yaml.safe_load(f) or {}
-
-    projects = cfg.get("projects", {})
+    projects = list(iter_registered_projects())
     if not projects:
         print("No projects registered. Use: harness-ctl register /path/to/project")
         return
 
     print(f"{'Project':<20} {'Path'}")
     print("-" * 60)
-    for name, path in projects.items():
-        exists = "OK" if os.path.isdir(path) else "MISSING"
+    for name, path in projects:
+        exists = "OK" if path.is_dir() else "MISSING"
         print(f"{name:<20} {path}  [{exists}]")
+
+
+def cmd_feedback_status(args: argparse.Namespace) -> None:
+    """Show community feedback consent and export status."""
+    from packages.learning.community_exchange import summarize_feedback_status
+
+    _print_json(summarize_feedback_status())
+
+
+def cmd_feedback_consent(args: argparse.Namespace) -> None:
+    """Set community feedback sharing consent."""
+    from datetime import datetime, timezone
+
+    from packages.learning.community_exchange import validate_consent_level
+
+    consent = validate_consent_level(args.level)
+    actor = args.actor or os.environ.get("USER") or "unknown"
+
+    harness_config_path, cfg = _load_harness_yaml()
+    feedback_cfg = cfg.setdefault("community_feedback", {})
+    feedback_cfg["consent"] = consent
+    feedback_cfg["updated_at"] = datetime.now(timezone.utc).isoformat()
+    feedback_cfg["updated_by"] = actor
+    _save_harness_yaml(harness_config_path, cfg)
+
+    print(f"Community feedback consent set to: {consent}")
+    print(f"  Updated by: {actor}")
+
+
+def cmd_feedback_export(args: argparse.Namespace) -> None:
+    """Export anonymized community feedback for upstream sharing."""
+    from packages.learning.community_exchange import (
+        build_feedback_export,
+        get_feedback_settings,
+        write_feedback_export,
+    )
+
+    settings = get_feedback_settings()
+    if not settings.export_enabled:
+        print(
+            "Community feedback consent is local_only. "
+            "Run `harness-ctl feedback consent anonymized_export` to enable export.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    bundle = build_feedback_export(include_all=args.all, limit=args.limit)
+    if bundle["event_count"] == 0:
+        print("No feedback events available for export.")
+        return
+
+    output_path = write_feedback_export(
+        bundle,
+        output_path=args.output,
+        advance_state=not args.no_mark_exported,
+    )
+
+    print(f"Exported {bundle['event_count']} feedback events to: {output_path}")
+    _print_json({
+        "consent": bundle["consent"],
+        "event_count": bundle["event_count"],
+        "line_range": bundle["line_range"],
+        "output_path": str(output_path),
+        "marked_exported": not args.no_mark_exported,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -402,34 +597,101 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["code_change", "marketing_campaign", "content_creation"],
         help="Task type (default: code_change)",
     )
+    p_submit.add_argument("--project", default="", help="Registered project name")
 
     # status
     p_status = subparsers.add_parser("status", help="Show task status")
     p_status.add_argument("task_id", nargs="?", help="Task ID (omit to show all)")
+    p_status.add_argument("--project", default="", help="Registered project name")
 
     # budget
     p_budget = subparsers.add_parser("budget", help="Show budget usage")
     p_budget.add_argument("task_id", nargs="?", help="Task ID")
+    p_budget.add_argument("--project", default="", help="Registered project name")
 
     # list
-    subparsers.add_parser("list", help="List all tasks")
+    p_list = subparsers.add_parser("list", help="List all tasks")
+    p_list.add_argument("--project", default="", help="Registered project name")
 
     # approve
     p_approve = subparsers.add_parser("approve", help="Approve a task")
     p_approve.add_argument("task_id", help="Task ID to approve")
+    p_approve.add_argument("--project", default="", help="Registered project name")
 
     # reject
     p_reject = subparsers.add_parser("reject", help="Reject a task")
     p_reject.add_argument("task_id", help="Task ID to reject")
     p_reject.add_argument("--reason", default="", help="Rejection reason")
+    p_reject.add_argument("--project", default="", help="Registered project name")
 
     # register
     p_register = subparsers.add_parser("register", help="Register a project")
     p_register.add_argument("path", help="Path to the project repository")
     p_register.add_argument("--name", default="", help="Project name (default: directory name)")
+    p_register.add_argument(
+        "--mode",
+        default="external",
+        choices=["external", "assisted"],
+        help="Registration mode (default: external)",
+    )
+    p_register.add_argument(
+        "--skip-codegraph",
+        action="store_true",
+        help="Skip codegraph build during registration (degraded repo-intel mode)",
+    )
+    p_register.add_argument(
+        "--codegraph-timeout",
+        type=int,
+        default=120,
+        help="Timeout in seconds for codegraph build (default: 120)",
+    )
 
     # projects
     subparsers.add_parser("projects", help="List registered projects")
+
+    # feedback
+    p_feedback = subparsers.add_parser(
+        "feedback",
+        help="Inspect and export anonymized community feedback",
+    )
+    feedback_subparsers = p_feedback.add_subparsers(dest="feedback_command", help="Feedback commands")
+
+    feedback_subparsers.add_parser("status", help="Show feedback consent and export status")
+
+    p_feedback_consent = feedback_subparsers.add_parser("consent", help="Set feedback sharing consent")
+    p_feedback_consent.add_argument(
+        "level",
+        choices=["local_only", "anonymized_export"],
+        help="Consent level for community feedback sharing",
+    )
+    p_feedback_consent.add_argument(
+        "--actor",
+        default="",
+        help="Operator name recorded with the consent change",
+    )
+
+    p_feedback_export = feedback_subparsers.add_parser("export", help="Export feedback bundle for upstream sharing")
+    p_feedback_export.add_argument(
+        "--all",
+        action="store_true",
+        help="Export all recorded feedback events instead of only pending events",
+    )
+    p_feedback_export.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Maximum number of events to export (default: all pending)",
+    )
+    p_feedback_export.add_argument(
+        "--output",
+        default="",
+        help="Write the export bundle to this path instead of the default exports directory",
+    )
+    p_feedback_export.add_argument(
+        "--no-mark-exported",
+        action="store_true",
+        help="Do not advance the export state after writing the bundle",
+    )
 
     return parser
 
@@ -459,10 +721,24 @@ def main() -> None:
         "projects": cmd_projects,
     }
 
-    handler = dispatch.get(args.command)
+    if args.command == "feedback":
+        feedback_dispatch = {
+            "status": cmd_feedback_status,
+            "consent": cmd_feedback_consent,
+            "export": cmd_feedback_export,
+        }
+        handler = feedback_dispatch.get(getattr(args, "feedback_command", ""))
+    else:
+        handler = dispatch.get(args.command)
     if handler is None:
         parser.print_help()
         sys.exit(1)
+
+    if args.command == "feedback" and getattr(args, "feedback_command", None) == "export":
+        if args.limit <= 0:
+            args.limit = None
+        if not args.output:
+            args.output = None
 
     handler(args)
 

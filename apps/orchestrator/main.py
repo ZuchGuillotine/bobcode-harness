@@ -13,6 +13,7 @@ from apps.orchestrator.stages.intake import intake_node
 from apps.orchestrator.stages.learn import learn_node
 from apps.orchestrator.stages.plan import plan_node
 from apps.orchestrator.stages.validate import validate_node
+from packages.config import get_project_paths
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,10 @@ class TaskState(TypedDict, total=False):
 
     task_id: str
     task_type: str  # code_change | marketing_campaign | content_creation
+    project_name: str | None
+    repo_path: str | None
+    worktree_path: str | None
+    branch: str | None
     domain: str
     description: str
     status: str  # intake | planning | executing | validating | done | retry | failed | learned
@@ -151,12 +156,23 @@ def _init_tracing() -> None:
 # Entrypoint
 # ---------------------------------------------------------------------------
 
-async def run_task(description: str, task_type: str = "code_change") -> TaskState:
+async def run_task(
+    description: str,
+    task_type: str = "code_change",
+    project_name: str | None = None,
+    repo_path: str | None = None,
+) -> TaskState:
     """Submit a task and run it through the full orchestrator graph."""
+
+    project_paths = get_project_paths(project_name=project_name, repo_path=repo_path)
 
     initial_state: TaskState = {
         "task_id": "",
         "task_type": task_type,
+        "project_name": project_paths.project_name,
+        "repo_path": str(project_paths.repo_path) if project_paths.repo_path else repo_path,
+        "worktree_path": None,
+        "branch": None,
         "domain": "",
         "description": description,
         "status": "intake",

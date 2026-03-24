@@ -3,56 +3,49 @@
 from __future__ import annotations
 
 import logging
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from apps.orchestrator.task_router import TaskRouter
-from packages.llm.router import LLMRouter
+from packages.config import get_project_paths
 from packages.state.sqlite_store import SQLiteStore
 from packages.state.task_state import TaskStateManager
 
 logger = logging.getLogger(__name__)
 
-# Base directory for task working data
-HARNESS_DIR = ".harness"
-TASKS_DIR = os.path.join(HARNESS_DIR, "tasks")
-
-# Counter file for sequential task IDs
-_COUNTER_FILE = os.path.join(HARNESS_DIR, ".task_counter")
-
-_DB_PATH = os.environ.get("HARNESS_DB_PATH", os.path.join(HARNESS_DIR, "harness.db"))
-
-
-def _next_task_id() -> str:
+def _next_task_id(counter_file: str) -> str:
     """Generate the next sequential task ID (TASK-001, TASK-002, ...)."""
+    from pathlib import Path
 
-    os.makedirs(HARNESS_DIR, exist_ok=True)
+    counter_path = Path(counter_file)
+    counter_path.parent.mkdir(parents=True, exist_ok=True)
 
     counter = 1
-    if os.path.exists(_COUNTER_FILE):
+    if counter_path.exists():
         try:
-            with open(_COUNTER_FILE) as f:
+            with counter_path.open() as f:
                 counter = int(f.read().strip()) + 1
         except (ValueError, OSError):
             counter = 1
 
-    with open(_COUNTER_FILE, "w") as f:
+    with counter_path.open("w") as f:
         f.write(str(counter))
 
     return f"TASK-{counter:03d}"
 
 
-def _create_task_directory(task_id: str) -> str:
+def _create_task_directory(task_id: str, tasks_dir: str) -> str:
     """Create the working directory for a task via TaskStateManager."""
     try:
-        tsm = TaskStateManager()
+        tsm = TaskStateManager(tasks_dir=tasks_dir)
         task_path = tsm.create_task_dir(task_id)
         return str(task_path)
     except Exception:
+        import os
+
         # Fallback to manual directory creation
-        task_dir = os.path.join(TASKS_DIR, task_id)
+        task_dir = os.path.join(tasks_dir, task_id)
         os.makedirs(task_dir, exist_ok=True)
         for subdir in ("artifacts", "traces", "evals"):
             os.makedirs(os.path.join(task_dir, subdir), exist_ok=True)
@@ -82,12 +75,18 @@ def intake_node(state: dict[str, Any]) -> dict[str, Any]:
         router = TaskRouter()
         task_type = router.classify_task(description)
 
+    project_paths = get_project_paths(
+        project_name=state.get("project_name"),
+        repo_path=state.get("repo_path"),
+    )
+    project_paths.ensure_dirs()
+
     # --- Assign ID ---
-    task_id = _next_task_id()
+    task_id = _next_task_id(str(project_paths.counter_file))
     trace_id = str(uuid.uuid4())
 
     # --- Create task directory ---
-    task_dir = _create_task_directory(task_id)
+    task_dir = _create_task_directory(task_id, str(project_paths.tasks_dir))
 
     # --- Write task manifest ---
     import json
@@ -98,7 +97,11 @@ def intake_node(state: dict[str, Any]) -> dict[str, Any]:
         "description": description,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "trace_id": trace_id,
+        "project_name": project_paths.project_name,
+        "repo_path": str(project_paths.repo_path) if project_paths.repo_path else None,
     }
+
+    import os
 
     manifest_path = os.path.join(task_dir, "manifest.json")
     with open(manifest_path, "w") as f:
@@ -106,13 +109,15 @@ def intake_node(state: dict[str, Any]) -> dict[str, Any]:
 
     # --- Persist task to SQLiteStore ---
     try:
-        store = SQLiteStore(_DB_PATH)
+        store = SQLiteStore(str(project_paths.db_path))
         store.create_task({
             "task_id": task_id,
             "title": description[:120],
             "description": description,
             "status": "pending",
+            "branch": state.get("branch"),
             "metadata": manifest,
+            "worktree_path": state.get("worktree_path"),
         })
         store.close()
     except Exception:
@@ -131,8 +136,9 @@ def intake_node(state: dict[str, Any]) -> dict[str, Any]:
         domain = _infer_domain(task_type)
 
     logger.info(
-        "Intake complete: %s type=%s domain=%s trace=%s",
+        "Intake complete: %s project=%s type=%s domain=%s trace=%s",
         task_id,
+        project_paths.project_name or "legacy",
         task_type,
         domain,
         trace_id,
@@ -142,6 +148,8 @@ def intake_node(state: dict[str, Any]) -> dict[str, Any]:
         **state,
         "task_id": task_id,
         "task_type": task_type,
+        "project_name": project_paths.project_name,
+        "repo_path": str(project_paths.repo_path) if project_paths.repo_path else state.get("repo_path"),
         "domain": domain,
         "description": description,
         "status": "planning",
