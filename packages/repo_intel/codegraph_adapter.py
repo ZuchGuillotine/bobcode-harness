@@ -1,4 +1,4 @@
-"""Adapter wrapping the codegraph CLI/MCP for repository intelligence."""
+"""Adapter wrapping the optave/codegraph CLI for repository intelligence."""
 
 from __future__ import annotations
 
@@ -12,10 +12,15 @@ logger = logging.getLogger(__name__)
 
 
 class CodegraphAdapter:
-    """Wraps the codegraph CLI to provide symbol-level repo intelligence."""
+    """Wraps the optave codegraph CLI (v3.x) for symbol-level repo intelligence.
 
-    def __init__(self, codegraph_bin: str = "codegraph") -> None:
+    All queries are local SQLite lookups — zero API calls, zero tokens.
+    Requires ``codegraph build`` to have been run in the target repo.
+    """
+
+    def __init__(self, codegraph_bin: str = "codegraph", repo_path: str = ".") -> None:
         self._bin = codegraph_bin
+        self._repo_path = repo_path
         self._available: bool | None = None
 
     # ------------------------------------------------------------------
@@ -23,7 +28,6 @@ class CodegraphAdapter:
     # ------------------------------------------------------------------
 
     def _is_available(self) -> bool:
-        """Check whether the codegraph binary is on $PATH."""
         if self._available is None:
             self._available = shutil.which(self._bin) is not None
             if not self._available:
@@ -33,23 +37,20 @@ class CodegraphAdapter:
                 )
         return self._available
 
-    def _run(self, *args: str, timeout: int = 60) -> dict[str, Any]:
-        """Run a codegraph sub-command, parse JSON stdout, return dict.
-
-        Returns an empty dict (and logs a warning) when codegraph is
-        missing or the command fails.
-        """
+    def _run(self, *args: str, timeout: int = 30) -> dict[str, Any] | list[Any]:
+        """Run a codegraph sub-command with --json, return parsed output."""
         if not self._is_available():
             return {}
 
         cmd = [self._bin, *args, "--json"]
-        logger.debug("Running: %s", " ".join(cmd))
+        logger.debug("Running: %s (cwd=%s)", " ".join(cmd), self._repo_path)
         try:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                cwd=self._repo_path,
                 check=False,
             )
             if result.returncode != 0:
@@ -57,86 +58,197 @@ class CodegraphAdapter:
                     "codegraph %s exited %d: %s",
                     args[0] if args else "?",
                     result.returncode,
-                    result.stderr.strip(),
+                    result.stderr.strip()[:200],
                 )
                 return {}
-            return json.loads(result.stdout) if result.stdout.strip() else {}
+
+            stdout = result.stdout.strip()
+            if not stdout:
+                return {}
+            return json.loads(stdout)
         except subprocess.TimeoutExpired:
             logger.error("codegraph timed out after %ds", timeout)
             return {}
-        except json.JSONDecodeError as exc:
-            logger.error("Failed to parse codegraph JSON output: %s", exc)
-            return {}
+        except json.JSONDecodeError:
+            # Some commands return non-JSON text; return as raw string
+            logger.debug("codegraph output not JSON, returning raw")
+            return {"raw": result.stdout.strip()[:2000]}
         except FileNotFoundError:
             self._available = False
             logger.warning("codegraph binary disappeared from PATH")
             return {}
 
+    def _run_text(self, *args: str, timeout: int = 30) -> str:
+        """Run a codegraph sub-command and return raw text output."""
+        if not self._is_available():
+            return ""
+
+        cmd = [self._bin, *args]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=self._repo_path,
+                check=False,
+            )
+            return result.stdout.strip() if result.returncode == 0 else ""
+        except Exception:
+            return ""
+
     # ------------------------------------------------------------------
-    # Public API
+    # Public API — mapped to optave codegraph v3.x commands
     # ------------------------------------------------------------------
 
     def locate_symbol(self, symbol: str) -> dict[str, Any]:
-        """Return ``{file, line, kind}`` for *symbol*.
+        """Find where a symbol is defined and used.
 
-        Example return::
-
-            {"file": "src/foo.py", "line": 42, "kind": "function"}
+        Maps to: ``codegraph where <name> --json``
         """
-        raw = self._run("locate", symbol)
-        return {
-            "file": raw.get("file", ""),
-            "line": raw.get("line", 0),
-            "kind": raw.get("kind", "unknown"),
-        }
+        raw = self._run("where", symbol)
+        if isinstance(raw, dict) and raw.get("raw"):
+            return {"symbol": symbol, "locations": [], "raw": raw["raw"]}
+        if isinstance(raw, list) and raw:
+            first = raw[0] if raw else {}
+            return {
+                "file": first.get("file", ""),
+                "line": first.get("line", 0),
+                "kind": first.get("kind", "unknown"),
+                "symbol": symbol,
+                "locations": raw,
+            }
+        if isinstance(raw, dict):
+            results = raw.get("results", raw.get("definitions", []))
+            first = results[0] if results else {}
+            return {
+                "file": first.get("file", raw.get("file", "")),
+                "line": first.get("line", raw.get("line", 0)),
+                "kind": first.get("kind", raw.get("kind", "unknown")),
+                "symbol": symbol,
+                "locations": results or [raw] if raw.get("file") else [],
+            }
+        return {"symbol": symbol, "file": "", "line": 0, "kind": "unknown", "locations": []}
 
     def get_context(self, symbol: str, depth: int = 2) -> dict[str, Any]:
-        """Return callers, callees, and imports for *symbol*.
+        """Full context for a function: source, deps, callers, tests.
 
-        Example return::
-
-            {"callers": [...], "callees": [...], "imports": [...]}
+        Maps to: ``codegraph context <name> --json``
         """
-        raw = self._run("context", symbol, "--depth", str(depth))
-        return {
-            "callers": raw.get("callers", []),
-            "callees": raw.get("callees", []),
-            "imports": raw.get("imports", []),
-        }
+        raw = self._run("context", symbol)
+        if isinstance(raw, dict):
+            return {
+                "symbol": symbol,
+                "callers": raw.get("callers", []),
+                "callees": raw.get("callees", raw.get("deps", [])),
+                "source": raw.get("source", ""),
+                "file": raw.get("file", ""),
+                "tests": raw.get("tests", []),
+            }
+        return {"symbol": symbol, "callers": [], "callees": [], "source": "", "file": ""}
 
-    def get_impact(self, diff_path: str) -> dict[str, Any]:
-        """Analyse a diff/patch file and return blast-radius info.
+    def get_impact(self, target: str) -> dict[str, Any]:
+        """Function-level or file-level impact analysis.
 
-        Example return::
-
-            {"affected_symbols": [...], "affected_tests": [...], "blast_radius": 12}
+        Maps to: ``codegraph fn-impact <name> --json`` for symbols,
+        or ``codegraph impact <file> --json`` for files.
         """
-        raw = self._run("impact", diff_path)
-        return {
-            "affected_symbols": raw.get("affected_symbols", []),
-            "affected_tests": raw.get("affected_tests", []),
-            "blast_radius": raw.get("blast_radius", 0),
-        }
+        # Try fn-impact first (function level), fall back to file impact
+        if "." in target and "/" in target:
+            # Looks like a file path
+            raw = self._run("impact", target)
+        else:
+            raw = self._run("fn-impact", target)
 
-    def get_cochange(self, symbol: str) -> list[dict[str, Any]]:
-        """Return symbols that historically co-change with *symbol*.
+        if isinstance(raw, dict):
+            results = raw.get("results", [])
+            return {
+                "target": target,
+                "affected_symbols": [r.get("name", "") for r in results] if results else [],
+                "total_dependents": raw.get("totalDependents", len(results)),
+                "results": results,
+            }
+        return {"target": target, "affected_symbols": [], "total_dependents": 0}
 
-        Each entry is a dict like ``{"symbol": "...", "frequency": 5}``.
+    def get_cochange(self, file_path: str) -> list[dict[str, Any]]:
+        """Files that historically change together.
+
+        Maps to: ``codegraph co-change <file> --json``
         """
-        raw = self._run("cochange", symbol)
-        return raw.get("cochanges", [])
+        raw = self._run("co-change", file_path)
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, dict):
+            return raw.get("results", raw.get("pairs", []))
+        return []
 
     def get_boundary_violations(self, diff_path: str) -> list[dict[str, Any]]:
-        """Check a diff for architectural boundary violations.
+        """Check for architectural boundary violations via diff impact.
 
-        Each entry is a dict like::
-
-            {"source": "...", "target": "...", "rule": "..."}
+        Maps to: ``codegraph diff-impact --json``
         """
-        raw = self._run("boundaries", "--diff", diff_path)
-        return raw.get("violations", [])
+        raw = self._run("diff-impact")
+        if isinstance(raw, dict):
+            return raw.get("violations", raw.get("changes", []))
+        if isinstance(raw, list):
+            return raw
+        return []
 
     def get_candidate_tests(self, symbols: list[str]) -> list[str]:
-        """Return test file/function identifiers relevant to *symbols*."""
-        raw = self._run("tests", *symbols)
-        return raw.get("tests", [])
+        """Find tests related to given symbols via context queries."""
+        tests: list[str] = []
+        for symbol in symbols[:5]:  # Limit to avoid slowness
+            ctx = self.get_context(symbol)
+            tests.extend(ctx.get("tests", []))
+        return list(set(tests))
+
+    def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Semantic search: find functions by natural language description.
+
+        Maps to: ``codegraph search "<query>" --json``
+        """
+        raw = self._run("search", query)
+        if isinstance(raw, list):
+            return raw[:limit]
+        if isinstance(raw, dict):
+            return raw.get("results", [])[:limit]
+        return []
+
+    def get_complexity(self, target: str | None = None) -> list[dict[str, Any]]:
+        """Per-function complexity metrics.
+
+        Maps to: ``codegraph complexity [target] --json``
+        """
+        args = ["complexity"]
+        if target:
+            args.append(target)
+        raw = self._run(*args)
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, dict):
+            return raw.get("functions", raw.get("results", []))
+        return []
+
+    def get_stats(self) -> dict[str, Any]:
+        """Graph health overview.
+
+        Maps to: ``codegraph stats --json``
+        """
+        raw = self._run("stats")
+        return raw if isinstance(raw, dict) else {}
+
+    def get_deps(self, file_path: str) -> dict[str, Any]:
+        """File-level dependency info: imports and importers.
+
+        Maps to: ``codegraph deps <file> --json``
+        """
+        raw = self._run("deps", file_path)
+        return raw if isinstance(raw, dict) else {"imports": [], "importers": []}
+
+    def get_dataflow(self, symbol: str) -> dict[str, Any]:
+        """Data flow analysis for a function.
+
+        Maps to: ``codegraph dataflow <name> --json``
+        """
+        raw = self._run("dataflow", symbol)
+        return raw if isinstance(raw, dict) else {}
