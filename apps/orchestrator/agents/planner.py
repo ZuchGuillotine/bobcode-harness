@@ -213,11 +213,11 @@ class PlannerAgent:
         """Generate a plan packet for the given task state.
 
         Routes to Claude Code CLI (Max plan) when available, otherwise
-        falls back to LiteLLM API calls.
+        falls back to direct provider API calls.
         """
         if self._use_claude_code:
             return await self._plan_via_claude_code(task_state)
-        return await self._plan_via_litellm(task_state)
+        return await self._plan_via_llm(task_state)
 
     async def _plan_via_claude_code(self, task_state: dict[str, Any]) -> dict[str, Any]:
         """Plan using Claude Code CLI (uses Max subscription, not API credits).
@@ -253,8 +253,8 @@ class PlannerAgent:
 
             if result.returncode != 0:
                 logger.error("Claude Code CLI failed: %s", result.stderr[:500])
-                # Fall back to LiteLLM
-                return await self._plan_via_litellm(task_state)
+                # Fall back to provider API
+                return await self._plan_via_llm(task_state)
 
             content = result.stdout.strip()
             logger.info("Planner (Claude Code CLI/Opus) produced %d chars", len(content))
@@ -262,10 +262,10 @@ class PlannerAgent:
 
         except subprocess.TimeoutExpired:
             logger.error("Claude Code CLI timed out for task %s", task_id)
-            return await self._plan_via_litellm(task_state)
+            return await self._plan_via_llm(task_state)
         except Exception as exc:
             logger.error("Claude Code CLI error: %s", exc)
-            return await self._plan_via_litellm(task_state)
+            return await self._plan_via_llm(task_state)
 
     def _gather_repo_context(self, description: str) -> dict[str, Any]:
         """Pre-gather repo intelligence to include in the Claude Code prompt."""
@@ -300,12 +300,13 @@ class PlannerAgent:
 
         return context
 
-    async def _plan_via_litellm(self, task_state: dict[str, Any]) -> dict[str, Any]:
-        """Plan using LiteLLM API (standard API billing)."""
+    async def _plan_via_llm(self, task_state: dict[str, Any]) -> dict[str, Any]:
+        """Plan using the provider system (standard API billing)."""
 
-        import litellm  # type: ignore[import-untyped]
+        from packages.llm.providers import get_provider
 
         model = self._get_model()
+        provider = get_provider(model)
         task_id = task_state.get("task_id", "")
         description = task_state.get("description", "")
         task_type = task_state.get("task_type", "code_change")
@@ -326,7 +327,7 @@ class PlannerAgent:
 
         # Multi-turn tool-use loop (max 5 rounds)
         for _round in range(5):
-            response = await litellm.acompletion(
+            response = await provider.acomplete(
                 model=model,
                 messages=messages,
                 tools=PLANNER_TOOLS,
@@ -335,24 +336,60 @@ class PlannerAgent:
                 temperature=0.3,
             )
 
-            choice = response.choices[0]
+            # Access provider-specific raw response for tool_calls
+            raw = response.raw
+            # OpenAI-style: raw.choices[0].message.tool_calls
+            # Anthropic-style: raw.content blocks with type == "tool_use"
+            tool_calls = None
+            finish_reason = None
 
-            if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-                # Append assistant message with tool calls
-                messages.append(choice.message.model_dump())
+            if hasattr(raw, "choices") and raw.choices:
+                # OpenAI-compatible response
+                choice = raw.choices[0]
+                finish_reason = choice.finish_reason
+                tool_calls = choice.message.tool_calls
+                if finish_reason == "tool_calls" and tool_calls:
+                    messages.append(choice.message.model_dump())
+                    for tc in tool_calls:
+                        result = self._execute_tool(tc.function.name, tc.function.arguments)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": json.dumps(result),
+                        })
+                    continue
+            elif hasattr(raw, "content") and hasattr(raw, "stop_reason"):
+                # Anthropic-style response
+                tool_use_blocks = [b for b in raw.content if getattr(b, "type", None) == "tool_use"]
+                if raw.stop_reason == "tool_use" and tool_use_blocks:
+                    # Build assistant message for Anthropic tool-use protocol
+                    assistant_content = []
+                    for block in raw.content:
+                        if block.type == "text":
+                            assistant_content.append({"type": "text", "text": block.text})
+                        elif block.type == "tool_use":
+                            assistant_content.append({
+                                "type": "tool_use",
+                                "id": block.id,
+                                "name": block.name,
+                                "input": block.input,
+                            })
+                    messages.append({"role": "assistant", "content": assistant_content})
 
-                # Execute tool calls and append results
-                for tc in choice.message.tool_calls:
-                    result = self._execute_tool(tc.function.name, tc.function.arguments)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": json.dumps(result),
-                    })
-                continue
+                    # Execute each tool call and append results
+                    tool_results = []
+                    for block in tool_use_blocks:
+                        result = self._execute_tool(block.name, json.dumps(block.input))
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": json.dumps(result),
+                        })
+                    messages.append({"role": "user", "content": tool_results})
+                    continue
 
             # No more tool calls — extract final plan
-            content = choice.message.content or ""
+            content = response.content or ""
             return self._parse_plan(content, task_id, task_type)
 
         # Fell through the loop — return a minimal plan

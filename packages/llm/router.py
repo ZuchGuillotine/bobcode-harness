@@ -1,4 +1,9 @@
-"""LLM router that maps agent roles to models via LiteLLM."""
+"""LLM router that maps agent roles to models via pluggable providers.
+
+Replaces litellm with direct provider SDKs (anthropic, openai, google-genai)
+for zero supply-chain risk. Add new providers by dropping a module in
+packages/llm/providers/.
+"""
 
 from __future__ import annotations
 
@@ -9,23 +14,10 @@ from typing import Any
 
 import yaml
 
+from packages.llm.providers import get_provider, list_providers
+from packages.llm.providers.base import LLMResponse
+
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Lazy-import litellm so the module can be imported even if litellm
-# is not installed (tests, linting, etc.)
-# ---------------------------------------------------------------------------
-
-_litellm = None
-
-
-def _get_litellm():  # noqa: ANN202
-    global _litellm  # noqa: PLW0603
-    if _litellm is None:
-        import litellm  # type: ignore[import-untyped]
-
-        _litellm = litellm
-    return _litellm
 
 
 class LLMRouter:
@@ -44,8 +36,7 @@ class LLMRouter:
     ) -> None:
         self._config = self._load_config(config_path)
         self._store = sqlite_store
-        # Running totals for usage tracking
-        self._usage: dict[str, dict[str, Any]] = {}  # model -> {tokens, cost, calls}
+        self._usage: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Config loading
@@ -80,31 +71,34 @@ class LLMRouter:
         return primary, fallbacks
 
     # ------------------------------------------------------------------
-    # Public API
+    # Rate limit detection and retry
     # ------------------------------------------------------------------
 
     @staticmethod
     def _is_rate_limit_error(exc: Exception) -> bool:
-        """Check if an exception is a rate limit (429) error."""
         exc_str = str(exc).lower()
         return "rate_limit" in exc_str or "429" in exc_str or "too many requests" in exc_str
 
     def _call_with_retry(
         self,
-        litellm: Any,
         model: str,
         messages: list[dict[str, str]],
-        **call_kwargs: Any,
-    ) -> Any:
-        """Call litellm.completion with exponential backoff on rate limits."""
+        max_tokens: int,
+        temperature: float,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """Call provider with exponential backoff on rate limits."""
+        provider = get_provider(model)
         backoff = self.INITIAL_BACKOFF_SECS
 
         for attempt in range(self.MAX_RETRIES):
             try:
-                return litellm.completion(
+                return provider.complete(
                     model=model,
                     messages=messages,
-                    **call_kwargs,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    **kwargs,
                 )
             except Exception as exc:
                 if self._is_rate_limit_error(exc) and attempt < self.MAX_RETRIES - 1:
@@ -115,10 +109,13 @@ class LLMRouter:
                     time.sleep(backoff)
                     backoff = min(backoff * self.BACKOFF_MULTIPLIER, self.MAX_BACKOFF_SECS)
                     continue
-                raise  # Non-rate-limit error or final attempt
+                raise
 
-        # Should not reach here, but just in case
         raise RuntimeError(f"Exhausted {self.MAX_RETRIES} retries for {model}")
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def call(
         self,
@@ -129,53 +126,32 @@ class LLMRouter:
         """Send *messages* to the model mapped to *role*.
 
         Tries the primary model first with exponential backoff on rate
-        limits, then each fallback in order.  Returns a dict with
-        ``content``, ``model``, ``usage``, and ``duration_secs``.
+        limits, then each fallback in order.
         """
-        litellm = _get_litellm()
         role_cfg = self._resolve_role_config(role)
         primary, fallbacks = self._resolve_model(role)
         models_to_try = [primary] + fallbacks
 
         # Merge role-level defaults with caller overrides
-        call_kwargs: dict[str, Any] = {}
-        if "max_tokens" in role_cfg:
-            call_kwargs["max_tokens"] = role_cfg["max_tokens"]
-        if "temperature" in role_cfg:
-            call_kwargs["temperature"] = role_cfg["temperature"]
-        call_kwargs.update(kwargs)  # caller overrides win
+        max_tokens = kwargs.pop("max_tokens", role_cfg.get("max_tokens", 4000))
+        temperature = kwargs.pop("temperature", role_cfg.get("temperature", 0.2))
 
         last_err: Exception | None = None
         for model in models_to_try:
             try:
                 t0 = time.monotonic()
                 response = self._call_with_retry(
-                    litellm, model, messages, **call_kwargs,
+                    model, messages, max_tokens, temperature, **kwargs,
                 )
                 duration = time.monotonic() - t0
 
-                # Extract content and usage from the LiteLLM response
-                choice = response.choices[0]  # type: ignore[union-attr]
-                content = choice.message.content or ""
-                usage = {
-                    "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
-                    "completion_tokens": getattr(response.usage, "completion_tokens", 0),
-                    "total_tokens": getattr(response.usage, "total_tokens", 0),
-                }
-
-                # Estimate cost (litellm provides this via completion_cost)
-                try:
-                    cost = litellm.completion_cost(completion_response=response)
-                except Exception:
-                    cost = 0.0
-
-                self._track_usage(model, usage, cost)
+                self._track_usage(model, response.usage, response.cost)
 
                 return {
-                    "content": content,
-                    "model": model,
-                    "usage": usage,
-                    "cost": cost,
+                    "content": response.content,
+                    "model": response.model,
+                    "usage": response.usage,
+                    "cost": response.cost,
                     "duration_secs": round(duration, 3),
                 }
             except Exception as exc:
@@ -184,7 +160,10 @@ class LLMRouter:
                 continue
 
         raise RuntimeError(
-            f"All models exhausted for role '{role}'. Last error: {last_err}"
+            f"All models exhausted for role '{role}'. "
+            f"Tried: {models_to_try}. "
+            f"Available providers: {list_providers()}. "
+            f"Last error: {last_err}"
         )
 
     # ------------------------------------------------------------------
@@ -209,7 +188,6 @@ class LLMRouter:
         entry["cost"] += cost
         entry["calls"] += 1
 
-        # Persist to SQLite if a store is available
         if self._store is not None:
             try:
                 self._store.record_skill_usage(

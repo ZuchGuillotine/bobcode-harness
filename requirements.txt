@@ -1,5 +1,11 @@
 langgraph
-litellm==1.82.6  # PINNED: versions 1.82.7 and 1.82.8 are compromised (supply chain attack, 2026-03-24)
+# Direct provider SDKs (replaces litellm — removed due to supply chain compromise)
+anthropic>=0.40.0
+openai>=1.50.0
+# Optional providers (uncomment to enable):
+# google-genai>=1.0.0     # Gemini models
+# xai-sdk                  # Grok models (when available)
+# ollama                   # Local open-source models
 python-telegram-bot
 arize-phoenix
 opentelemetry-api

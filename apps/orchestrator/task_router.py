@@ -84,9 +84,10 @@ class TaskRouter:
         """Use a lightweight LLM call to classify the task."""
 
         try:
-            import litellm  # type: ignore[import-untyped]
+            from packages.llm.providers import get_provider
 
-            response = litellm.completion(
+            provider = get_provider(self._model)
+            response = provider.complete(
                 model=self._model,
                 messages=[
                     {
@@ -102,7 +103,7 @@ class TaskRouter:
                 max_tokens=20,
                 temperature=0.0,
             )
-            result = response.choices[0].message.content.strip().lower()
+            result = response.content.strip().lower()
             if result in TASK_TYPES:
                 logger.info("LLM classified task as '%s'", result)
                 return result

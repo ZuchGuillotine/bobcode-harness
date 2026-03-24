@@ -219,9 +219,10 @@ class WorkerAgent:
         Returns a dict with completed_steps, artifacts, tests_passed, summary.
         """
 
-        import litellm  # type: ignore[import-untyped]
+        from packages.llm.providers import get_provider
 
         model = self._get_model()
+        provider = get_provider(model)
         task_id = task_state.get("task_id", "")
         plan_steps = plan.get("plan_steps", [])
 
@@ -242,7 +243,7 @@ class WorkerAgent:
 
         # Multi-turn tool-use loop (max 10 rounds for complex implementations)
         for _round in range(10):
-            response = await litellm.acompletion(
+            response = await provider.acomplete(
                 model=model,
                 messages=messages,
                 tools=WORKER_TOOLS,
@@ -251,22 +252,52 @@ class WorkerAgent:
                 temperature=0.2,
             )
 
-            choice = response.choices[0]
+            # Access provider-specific raw response for tool_calls
+            raw = response.raw
 
-            if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-                messages.append(choice.message.model_dump())
+            if hasattr(raw, "choices") and raw.choices:
+                # OpenAI-compatible response
+                choice = raw.choices[0]
+                if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
+                    messages.append(choice.message.model_dump())
+                    for tc in choice.message.tool_calls:
+                        result = await self._execute_tool(tc.function.name, tc.function.arguments)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": json.dumps(result),
+                        })
+                    continue
+            elif hasattr(raw, "content") and hasattr(raw, "stop_reason"):
+                # Anthropic-style response
+                tool_use_blocks = [b for b in raw.content if getattr(b, "type", None) == "tool_use"]
+                if raw.stop_reason == "tool_use" and tool_use_blocks:
+                    assistant_content = []
+                    for block in raw.content:
+                        if block.type == "text":
+                            assistant_content.append({"type": "text", "text": block.text})
+                        elif block.type == "tool_use":
+                            assistant_content.append({
+                                "type": "tool_use",
+                                "id": block.id,
+                                "name": block.name,
+                                "input": block.input,
+                            })
+                    messages.append({"role": "assistant", "content": assistant_content})
 
-                for tc in choice.message.tool_calls:
-                    result = await self._execute_tool(tc.function.name, tc.function.arguments)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": json.dumps(result),
-                    })
-                continue
+                    tool_results = []
+                    for block in tool_use_blocks:
+                        result = await self._execute_tool(block.name, json.dumps(block.input))
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": json.dumps(result),
+                        })
+                    messages.append({"role": "user", "content": tool_results})
+                    continue
 
             # Final response
-            content = choice.message.content or ""
+            content = response.content or ""
             return self._parse_result(content, task_id)
 
         logger.warning("Worker exhausted tool-use rounds for task %s", task_id)

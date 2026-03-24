@@ -93,30 +93,19 @@ def mock_llm_router():
     The mock's ``call`` method returns a realistic response dict without
     making any real API calls.
     """
-    with patch("packages.llm.router._get_litellm") as mock_get_litellm:
-        # Set up the fake litellm module
-        fake_litellm = MagicMock()
-        mock_get_litellm.return_value = fake_litellm
+    from packages.llm.providers.base import LLMResponse
 
-        # Build a realistic completion response
-        mock_choice = MagicMock()
-        mock_choice.message.content = '{"result": "mocked LLM response"}'
+    mock_provider = MagicMock()
+    mock_provider.complete.return_value = LLMResponse(
+        content='{"result": "mocked LLM response"}',
+        model="mock/model",
+        usage={"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        cost=0.003,
+    )
 
-        mock_usage = MagicMock()
-        mock_usage.prompt_tokens = 100
-        mock_usage.completion_tokens = 50
-        mock_usage.total_tokens = 150
-
-        mock_response = MagicMock()
-        mock_response.choices = [mock_choice]
-        mock_response.usage = mock_usage
-
-        fake_litellm.completion.return_value = mock_response
-        fake_litellm.completion_cost.return_value = 0.003
-
+    with patch("packages.llm.router.get_provider", return_value=mock_provider):
         from packages.llm.router import LLMRouter
 
-        # Use the real model_routing.yaml from the project
         config_path = os.path.join(
             os.path.dirname(__file__), "..", "config", "model_routing.yaml"
         )
