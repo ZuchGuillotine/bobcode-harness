@@ -1,6 +1,6 @@
 # bobcode-harness — Project Status
 
-**Last Updated:** 2026-03-23
+**Last Updated:** 2026-03-24
 **Phase:** 1 (Core Loop) — Near Complete
 **Repo:** https://github.com/ZuchGuillotine/bobcode-harness
 
@@ -23,7 +23,8 @@
 - [x] `cli.py` — `harness-ctl` (submit, status, budget, list, approve, reject, register, projects)
 
 ### Packages
-- [x] `packages/llm/router.py` — LiteLLM wrapper with model routing, fallback, rate limit retry with exponential backoff, cost tracking
+- [x] `packages/llm/router.py` — Model routing with fallback, rate limit retry (exponential backoff), cost tracking
+- [x] `packages/llm/providers/` — Pluggable provider system (replaced litellm after supply chain compromise)
 - [x] `packages/llm/prompt_loader.py` — Versioned prompt loading from `prompts/{role}/`
 - [x] `packages/state/sqlite_store.py` — Full CRUD (tasks, evals, failures, metrics, skill usage)
 - [x] `packages/state/task_state.py` — File-based task directory management
@@ -212,13 +213,28 @@ When a cross-project pattern is detected, the harness proposes a fix and generat
 | Role | Model | Route | Billing |
 |------|-------|-------|---------|
 | **Planner** | Opus 4.6 | Claude Code CLI (`claude --print`) | Max subscription |
-| **Worker** | Sonnet 4.6 | LiteLLM → Anthropic API | API credits |
-| **Reviewer** | Sonnet 4.6 | LiteLLM → Anthropic API | API credits |
-| **Content** | Sonnet 4.6 | LiteLLM → Anthropic API | API credits |
-| **Eval Judge** | Sonnet 4.6 | LiteLLM → Anthropic API | API credits |
-| **Lightweight** | GPT-5.4-mini | LiteLLM → OpenAI API | OpenAI credits |
+| **Worker** | Sonnet 4.6 | Direct Anthropic SDK | API credits |
+| **Reviewer** | Sonnet 4.6 | Direct Anthropic SDK | API credits |
+| **Content** | Sonnet 4.6 | Direct Anthropic SDK | API credits |
+| **Eval Judge** | Sonnet 4.6 | Direct Anthropic SDK | API credits |
+| **Lightweight** | GPT-5.4-mini | Direct OpenAI SDK | OpenAI credits |
 
 All roles fall back to OpenAI/gpt-5.4-mini if primary provider fails.
+
+### Provider Architecture (post-litellm removal)
+
+litellm was removed on 2026-03-24 after versions 1.82.7+ were found to contain supply chain malware (credential theft, Kubernetes lateral movement). Replaced with a thin adapter pattern:
+
+```
+packages/llm/providers/
+  base.py              # LLMProvider interface + LLMResponse (~30 lines)
+  anthropic_provider.py # Anthropic Messages API (~40 lines)
+  openai_provider.py    # OpenAI Chat Completions (~40 lines)
+  google_provider.py    # Gemini (optional, auto-registers if google-genai installed)
+  __init__.py           # Provider registry with auto-discovery
+```
+
+Adding a new provider (Grok, Ollama, Mistral, etc.) = one file implementing `complete()` and `acomplete()`. No monolithic routing library needed.
 
 ### Repo Intelligence (codegraph)
 
@@ -241,11 +257,11 @@ All queries are local (SQLite + embeddings). Zero API calls, zero tokens consume
 
 ## File Inventory
 
-**~78 files delivered** across all phases.
+**~83 files delivered** across all phases.
 
 ```
 apps/orchestrator/          14 files  (complete for Phase 1)
-packages/                   18 files  (complete for Phase 1; +5 files needed for Phase 3 learning)
+packages/                   23 files  (complete for Phase 1; includes provider adapters; +5 for Phase 3 learning)
 config/                      5 files  (complete; +per-project overrides as projects are added)
 skills/code/                 3 files  (complete; +marketing skills in Phase 2)
 prompts/                    12 files  (complete; +skill_maintainer persona in Phase 3)
@@ -308,7 +324,7 @@ docs/ADRs/003_codegraph_as_primary_repo_intel.md
 |-----------|--------|-------|-------|
 | LangGraph orchestrator | Complete | 14 | 6 integration |
 | 3 agents (Planner/Worker/Reviewer) | Wired to real implementations | 3 | mocked in integration |
-| LLM Router (LiteLLM + Claude Code CLI) | Complete, with rate limit backoff | 1 | 8 unit |
+| LLM Router + Provider SDKs | Complete, direct SDKs (litellm removed) | 6 | 8 unit |
 | SQLite state store | Complete | 1 | 10 unit |
 | Task state manager | Complete | 1 | 10 unit |
 | Budget enforcer | Complete | 1 | 10 unit |
@@ -328,7 +344,7 @@ docs/ADRs/003_codegraph_as_primary_repo_intel.md
 | Scripts | setup, deploy, backup | 3 | — |
 | Tests | 60 passing | 9 | — |
 | README + LICENSE | Complete | 2 | — |
-| **Total** | | **~78** | **60** |
+| **Total** | | **~83** | **60** |
 
 ### What's Not Shipped Yet
 
@@ -350,6 +366,7 @@ docs/ADRs/003_codegraph_as_primary_repo_intel.md
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
+| LLM interface | Direct provider SDKs (anthropic, openai, google-genai) | litellm removed after supply chain attack (v1.82.7+, 2026-03-24). Thin adapter pattern — one ~40-line file per provider, zero monolithic dependencies. |
 | Orchestration | LangGraph | Production-proven stateful graphs, durable execution, checkpointing |
 | Planner routing | Claude Code CLI | Uses Max subscription for expensive Opus calls |
 | Worker/Reviewer routing | Anthropic API via LiteLLM | Cheaper Sonnet calls with automatic fallback |
