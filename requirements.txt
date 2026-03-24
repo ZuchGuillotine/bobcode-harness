@@ -1,0 +1,18 @@
+langgraph
+litellm
+python-telegram-bot
+arize-phoenix
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-otlp
+kuzu
+pyyaml
+pydantic
+httpx
+aiohttp
+
+# Dev dependencies
+pytest
+pytest-asyncio
+ruff
+mypy

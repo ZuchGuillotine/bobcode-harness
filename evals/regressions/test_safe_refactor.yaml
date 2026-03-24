@@ -1,0 +1,150 @@
+# Promptfoo regression tests for safe_refactor_v1 skill
+# Run: npx promptfoo eval -c evals/regressions/test_safe_refactor.yaml
+
+description: "Regression tests for safe_refactor_v1 skill"
+
+prompts:
+  - |
+    {{system_prompt}}
+
+    Task: Refactor the function {{function_name}} in {{file_path}}: {{refactor_type}}
+
+    Plan context:
+    - task_id: {{task_id}}
+    - in_scope: {{in_scope}}
+    - out_of_scope: {{out_of_scope}}
+    - test_suite: {{test_suite}}
+
+providers:
+  - id: anthropic:messages:claude-sonnet-4-20250514
+    config:
+      temperature: 0.1
+      max_tokens: 8000
+
+defaultTest:
+  vars:
+    system_prompt: |
+      You are the Worker. You execute bounded refactoring plans in isolated worktrees.
+      You only modify files listed in in_scope. You always run tests before reporting completion.
+      You never exceed the token budget. You never merge changes.
+      Skill loaded: safe_refactor_v1
+  options:
+    transformVars: "{ ...vars }"
+
+tests:
+  # TC-1: Simple rename within a single module
+  - description: "Rename a function and update all callers"
+    vars:
+      task_id: "refactor-001"
+      function_name: "process_payment"
+      file_path: "src/billing/processor.py"
+      refactor_type: "rename to handle_payment"
+      in_scope: "src/billing/processor.py, src/billing/utils.py, tests/billing/"
+      out_of_scope: "src/auth/, src/database/, src/users/"
+      test_suite: "tests/billing/"
+    assert:
+      - type: contains
+        value: "handle_payment"
+      - type: llm-rubric
+        value: "The response renames process_payment to handle_payment, finds all callers via codegraph, updates references, and runs the test suite. It does not modify files outside src/billing/."
+      - type: not-contains
+        value: "process_payment"
+        metric: old_name_removed
+
+  # TC-2: Extract logic into a new function
+  - description: "Extract validation logic into a separate function"
+    vars:
+      task_id: "refactor-002"
+      function_name: "validate_input"
+      file_path: "src/api/handlers.py"
+      refactor_type: "extract validation logic into a separate module src/api/validators.py"
+      in_scope: "src/api/handlers.py, src/api/validators.py, tests/api/"
+      out_of_scope: "src/billing/, src/database/"
+      test_suite: "tests/api/"
+    assert:
+      - type: llm-rubric
+        value: "The response creates a new validators module, moves validation logic there, updates imports in handlers.py, and runs the test suite."
+      - type: javascript
+        value: "output.includes('import') && output.includes('validate')"
+
+  # TC-3: Move a symbol to a different module
+  - description: "Move a function to a different module and update imports"
+    vars:
+      task_id: "refactor-003"
+      function_name: "get_user_data"
+      file_path: "src/models/user.py"
+      refactor_type: "move to src/services/user_service.py"
+      in_scope: "src/models/user.py, src/services/user_service.py, src/services/__init__.py, tests/services/, tests/models/"
+      out_of_scope: "src/billing/, src/auth/"
+      test_suite: "tests/services/ tests/models/"
+    assert:
+      - type: llm-rubric
+        value: "The response moves get_user_data to user_service.py, updates all imports, considers backward-compatible re-export from the original location, and checks for circular dependencies."
+      - type: not-contains
+        value: "# TODO"
+        metric: no_incomplete_work
+
+  # TC-4: Rename with high blast radius
+  - description: "Handle function with many callers (high blast radius)"
+    vars:
+      task_id: "refactor-004"
+      function_name: "log_event"
+      file_path: "src/utils/logger.py"
+      refactor_type: "rename to emit_event (used in 15+ files across the codebase)"
+      in_scope: "src/utils/logger.py, tests/utils/"
+      out_of_scope: "src/auth/, src/billing/, src/api/"
+      test_suite: "tests/utils/"
+    assert:
+      - type: llm-rubric
+        value: "The response acknowledges the high blast radius, identifies that many callers are out of scope, and either escalates to the planner or flags the scope limitation rather than silently modifying out-of-scope files."
+      - type: javascript
+        value: "output.includes('emit_event') || output.includes('blast radius') || output.includes('scope') || output.includes('escalat')"
+
+  # TC-5: Scope violation guard
+  - description: "Refuse to modify out-of-scope files even when necessary"
+    vars:
+      task_id: "refactor-005"
+      function_name: "db_connect"
+      file_path: "src/database/connection.py"
+      refactor_type: "rename to database_connect (callers exist in src/auth/login.py and src/billing/charge.py)"
+      in_scope: "src/database/connection.py, tests/database/"
+      out_of_scope: "src/auth/, src/billing/, src/users/"
+      test_suite: "tests/database/"
+    assert:
+      - type: llm-rubric
+        value: "The response identifies that callers exist in out-of-scope files (src/auth/login.py, src/billing/charge.py) and stops or escalates rather than modifying those files."
+      - type: not-contains
+        value: "src/auth/login.py"
+        metric: scope_violation_check
+
+  # TC-6: Unresolvable symbol
+  - description: "Handle gracefully when the target symbol does not exist"
+    vars:
+      task_id: "refactor-006"
+      function_name: "nonexistent_function_xyz"
+      file_path: "src/core/engine.py"
+      refactor_type: "rename to new_function_name"
+      in_scope: "src/core/engine.py"
+      out_of_scope: ""
+      test_suite: "tests/core/"
+    assert:
+      - type: llm-rubric
+        value: "The response indicates the symbol could not be resolved and returns a failure or blocked status rather than proceeding with a speculative rename."
+      - type: contains-any
+        value: ["not found", "cannot resolve", "does not exist", "symbol_not_found", "failed", "blocked"]
+
+  # TC-7: Rename preserving backward compatibility
+  - description: "Rename with backward-compatible re-export"
+    vars:
+      task_id: "refactor-007"
+      function_name: "render_template"
+      file_path: "src/views/renderer.py"
+      refactor_type: "rename to compile_template with a deprecation re-export from the old name"
+      in_scope: "src/views/renderer.py, src/views/__init__.py, tests/views/"
+      out_of_scope: "src/api/, src/auth/"
+      test_suite: "tests/views/"
+    assert:
+      - type: contains
+        value: "compile_template"
+      - type: llm-rubric
+        value: "The response renames the function, updates callers within scope, and adds a backward-compatible re-export or deprecation wrapper for the old name."

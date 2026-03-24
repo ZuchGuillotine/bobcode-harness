@@ -1,0 +1,36 @@
+harness:
+  name: agent-harness
+  version: "1.0.0"
+  data_dir: /opt/agent-harness/data
+  log_dir: /opt/agent-harness/logs
+  secrets_dir: /opt/agent-harness/secrets
+
+orchestrator:
+  max_concurrent_tasks: 5
+  default_budget:
+    max_tokens: 500000
+    max_cost_usd: 5.00
+    max_duration_minutes: 30
+    max_retries: 3
+
+stage_manager:
+  worktree_base: /opt/agent-harness/data/worktrees
+  tmux_prefix: harness
+
+tracing:
+  phoenix_port: 6006
+  export_dir: /opt/agent-harness/data/traces
+
+notifications:
+  telegram:
+    enabled: true
+    allowed_chat_ids: []  # Add your Telegram chat IDs here
+    polling_interval: 1
+
+database:
+  sqlite_path: /opt/agent-harness/data/sqlite/harness.db
+  kuzu_path: /opt/agent-harness/data/kuzu
+
+# Registered projects
+# Add projects here or use: harness-ctl register /path/to/project
+projects: {}

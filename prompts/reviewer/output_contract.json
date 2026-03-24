@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReviewerOutput",
+  "description": "Output contract for the Reviewer agent. Every reviewer response must conform to this schema.",
+  "type": "object",
+  "required": [
+    "role_statement",
+    "task_id",
+    "verdict",
+    "issues",
+    "confidence",
+    "missing_checks"
+  ],
+  "properties": {
+    "role_statement": {
+      "type": "string",
+      "const": "reviewer",
+      "description": "Identifies this output as coming from the reviewer role."
+    },
+    "task_id": {
+      "type": "string",
+      "description": "Unique identifier for the task being reviewed."
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["approved", "rejected", "needs_changes"],
+      "description": "The review verdict."
+    },
+    "verdict_justification": {
+      "type": "string",
+      "description": "Human-readable explanation of why this verdict was chosen."
+    },
+    "issues": {
+      "type": "array",
+      "description": "List of issues found during review. Empty array if none.",
+      "items": {
+        "type": "object",
+        "required": ["severity", "file", "description"],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"],
+            "description": "Issue severity level."
+          },
+          "file": {
+            "type": "string",
+            "description": "File path where the issue was found."
+          },
+          "line": {
+            "type": "integer",
+            "description": "Line number in the file, if applicable."
+          },
+          "description": {
+            "type": "string",
+            "description": "Clear description of the issue with evidence."
+          },
+          "suggestion": {
+            "type": "string",
+            "description": "Recommended fix or action, if applicable."
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "boundary_violation",
+              "correctness",
+              "safety",
+              "performance",
+              "test_coverage",
+              "style",
+              "architecture",
+              "documentation"
+            ],
+            "description": "Category of the issue."
+          }
+        }
+      }
+    },
+    "boundary_violations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "List of files modified outside plan.in_scope."
+    },
+    "missing_tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["symbol", "file"],
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "The symbol or code path lacking test coverage."
+          },
+          "file": {
+            "type": "string",
+            "description": "File containing the untested code."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why test coverage is needed for this path."
+          }
+        }
+      },
+      "description": "Changed code paths that lack test coverage."
+    },
+    "definition_of_done_status": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["item", "status"],
+        "properties": {
+          "item": {
+            "type": "string",
+            "description": "The definition_of_done item text."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["met", "not_met", "cannot_verify"],
+            "description": "Verification status."
+          },
+          "evidence": {
+            "type": "string",
+            "description": "Evidence supporting the status determination."
+          }
+        }
+      },
+      "description": "Verification status for each definition_of_done item."
+    },
+    "blast_radius": {
+      "type": "string",
+      "enum": ["contained", "moderate", "wide"],
+      "description": "Assessment of the downstream impact scope."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Reviewer confidence in the verdict. Must be >= 0.7 to avoid human escalation."
+    },
+    "missing_checks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Checks that could not be performed. Empty array if all checks completed."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Human-readable summary of the review, suitable for display to the requestor."
+    }
+  },
+  "additionalProperties": false
+}

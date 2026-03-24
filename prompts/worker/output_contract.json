@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WorkerOutput",
+  "description": "Output contract for the Worker agent. Every worker response must conform to this schema.",
+  "type": "object",
+  "required": [
+    "role_statement",
+    "task_id",
+    "artifacts",
+    "test_results",
+    "tokens_used",
+    "errors"
+  ],
+  "properties": {
+    "role_statement": {
+      "type": "string",
+      "const": "worker",
+      "description": "Identifies this output as coming from the worker role."
+    },
+    "task_id": {
+      "type": "string",
+      "description": "Unique identifier for the task that was executed."
+    },
+    "artifacts": {
+      "type": "object",
+      "description": "Deliverables produced by the worker.",
+      "properties": {
+        "diffs": {
+          "type": "array",
+          "description": "Unified diffs of code changes.",
+          "items": {
+            "type": "object",
+            "required": ["file", "diff"],
+            "properties": {
+              "file": {
+                "type": "string",
+                "description": "File path relative to repository root."
+              },
+              "diff": {
+                "type": "string",
+                "description": "Unified diff content for this file."
+              },
+              "operation": {
+                "type": "string",
+                "enum": ["modified", "created", "deleted"],
+                "description": "Type of file operation."
+              }
+            }
+          }
+        },
+        "content": {
+          "type": "array",
+          "description": "Generated content artifacts (blog posts, copy, assets).",
+          "items": {
+            "type": "object",
+            "required": ["name", "content_type", "body"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Artifact name or filename."
+              },
+              "content_type": {
+                "type": "string",
+                "description": "MIME type or content category."
+              },
+              "body": {
+                "type": "string",
+                "description": "The content itself."
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "test_results": {
+      "type": "object",
+      "description": "Test execution results.",
+      "required": ["total", "passed", "failed", "skipped"],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total number of tests run."
+        },
+        "passed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of tests that passed."
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of tests that failed."
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of tests skipped."
+        },
+        "duration_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Total test execution time in seconds."
+        },
+        "failures": {
+          "type": "array",
+          "description": "Details of failed tests.",
+          "items": {
+            "type": "object",
+            "required": ["test_name", "message"],
+            "properties": {
+              "test_name": {
+                "type": "string",
+                "description": "Fully qualified test name."
+              },
+              "message": {
+                "type": "string",
+                "description": "Failure message or traceback."
+              }
+            }
+          }
+        }
+      }
+    },
+    "tokens_used": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Actual token consumption during execution."
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["step_id", "error_type", "message"],
+        "properties": {
+          "step_id": {
+            "type": "integer",
+            "description": "The plan step where the error occurred."
+          },
+          "error_type": {
+            "type": "string",
+            "enum": [
+              "scope_violation",
+              "tool_failure",
+              "test_failure",
+              "budget_exceeded",
+              "skill_not_found",
+              "input_missing",
+              "unknown"
+            ],
+            "description": "Category of the error."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable error description."
+          },
+          "recoverable": {
+            "type": "boolean",
+            "description": "Whether the worker attempted recovery."
+          }
+        }
+      },
+      "description": "Errors encountered during execution. Empty array if none."
+    }
+  },
+  "additionalProperties": false
+}

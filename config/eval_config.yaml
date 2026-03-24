@@ -1,0 +1,27 @@
+eval:
+  promptfoo:
+    config_dir: evals
+    output_dir: .harness/eval_outputs
+    default_provider: anthropic:messages:claude-sonnet-4-6
+    timeout_seconds: 120
+    max_concurrency: 3
+
+  deterministic:
+    blast_radius_threshold: 50
+    require_tests_passed: true
+    require_schema_valid: true
+    require_budget_compliant: true
+
+  phases:
+    phase1:
+      - deterministic
+      - promptfoo_regression
+    phase2:
+      - deterministic
+      - promptfoo_regression
+      - deepeval_behavioral
+    phase3:
+      - deterministic
+      - promptfoo_regression
+      - deepeval_behavioral
+      - marketing_eval

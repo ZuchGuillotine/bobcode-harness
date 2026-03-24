@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PlannerOutput",
+  "description": "Output contract for the Planner agent. Every planner response must conform to this schema.",
+  "type": "object",
+  "required": [
+    "role_statement",
+    "task_id",
+    "task_type",
+    "plan_steps",
+    "selected_skill",
+    "estimated_budget_tokens",
+    "confidence",
+    "missing_evidence",
+    "in_scope",
+    "out_of_scope"
+  ],
+  "properties": {
+    "role_statement": {
+      "type": "string",
+      "const": "planner",
+      "description": "Identifies this output as coming from the planner role."
+    },
+    "task_id": {
+      "type": "string",
+      "description": "Unique identifier for the task being planned."
+    },
+    "task_type": {
+      "type": "string",
+      "enum": ["code_change", "marketing_campaign", "content_creation", "mixed"],
+      "description": "Classification of the task."
+    },
+    "plan_steps": {
+      "type": "array",
+      "description": "Ordered list of actions for the worker to execute.",
+      "items": {
+        "type": "object",
+        "required": ["step_id", "action", "skill", "inputs", "expected_output"],
+        "properties": {
+          "step_id": {
+            "type": "integer",
+            "description": "Sequential step number starting from 1."
+          },
+          "action": {
+            "type": "string",
+            "description": "Human-readable description of what this step does."
+          },
+          "skill": {
+            "type": "string",
+            "description": "Skill ID to invoke for this step (e.g., safe_refactor_v1)."
+          },
+          "inputs": {
+            "type": "object",
+            "description": "Key-value pairs of inputs required by the skill.",
+            "additionalProperties": true
+          },
+          "expected_output": {
+            "type": "string",
+            "description": "Description of what successful completion looks like."
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Codegraph query results or source references justifying this step."
+          }
+        }
+      }
+    },
+    "selected_skill": {
+      "type": "string",
+      "description": "Primary skill ID selected for the task. For multi-step plans with different skills, this is the dominant skill."
+    },
+    "estimated_budget_tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total estimated token cost for executing the plan."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Planner confidence in the plan. Must be >= 0.7 to proceed without human review."
+    },
+    "missing_evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "List of information gaps that could not be resolved. Empty array if none."
+    },
+    "in_scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Files, modules, and symbols that may be modified."
+    },
+    "out_of_scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Files, modules, and symbols that must NOT be modified."
+    }
+  },
+  "additionalProperties": false
+}

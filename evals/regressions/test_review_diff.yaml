@@ -1,0 +1,224 @@
+# Promptfoo regression tests for review_diff_v1 skill
+# Run: npx promptfoo eval -c evals/regressions/test_review_diff.yaml
+
+description: "Regression tests for review_diff_v1 skill"
+
+prompts:
+  - |
+    {{system_prompt}}
+
+    Review the following diff for {{repo_name}}:
+
+    ```diff
+    {{diff_content}}
+    ```
+
+    Plan context:
+    - task_id: {{task_id}}
+    - in_scope: {{in_scope}}
+    - out_of_scope: {{out_of_scope}}
+    - definition_of_done: {{definition_of_done}}
+
+    Context: {{context}}
+
+providers:
+  - id: anthropic:messages:claude-sonnet-4-20250514
+    config:
+      temperature: 0.1
+      max_tokens: 4000
+
+defaultTest:
+  vars:
+    system_prompt: |
+      You are the Reviewer. You provide independent verification of output quality.
+      You have read-only access. You never modify code.
+      You flag all boundary violations, check blast radius, and verify test coverage.
+      Skill loaded: review_diff_v1
+    task_id: "review-default"
+    in_scope: ""
+    out_of_scope: ""
+    definition_of_done: "Changes match plan intent. Tests pass. No security issues."
+
+tests:
+  # TC-1: Detect command injection vulnerability
+  - description: "Flag os.system call as critical security vulnerability"
+    vars:
+      task_id: "review-001"
+      repo_name: "payments-service"
+      in_scope: "src/billing/processor.py"
+      out_of_scope: "src/auth/, src/database/"
+      diff_content: |
+        --- a/src/billing/processor.py
+        +++ b/src/billing/processor.py
+        @@ -15,6 +15,7 @@
+         def process_payment(amount, currency):
+        +    os.system(f"echo {amount}")
+             validate_amount(amount)
+             return gateway.charge(amount, currency)
+      context: "Bug fix for payment processing"
+    assert:
+      - type: llm-rubric
+        value: "The review flags the os.system call as a critical security vulnerability (command injection risk) and recommends rejection."
+      - type: contains-any
+        value: ["security", "injection", "os.system", "critical", "vulnerability"]
+
+  # TC-2: Detect architectural boundary violation in imports
+  - description: "Flag cross-layer import as boundary violation"
+    vars:
+      task_id: "review-002"
+      repo_name: "api-gateway"
+      in_scope: "src/routes/auth.py"
+      out_of_scope: "src/database/"
+      diff_content: |
+        --- a/src/routes/auth.py
+        +++ b/src/routes/auth.py
+        @@ -1,5 +1,5 @@
+        -from src.middleware import validate_token
+        +from src.database import validate_token
+
+         def login(request):
+             return validate_token(request.token)
+      context: "Refactoring auth module"
+    assert:
+      - type: llm-rubric
+        value: "The review flags that a route handler is now importing directly from the database layer, which is an architectural boundary violation."
+      - type: contains-any
+        value: ["boundary", "violation", "layer", "import", "database", "architecture"]
+
+  # TC-3: Detect plaintext password comparison
+  - description: "Flag plaintext password storage and comparison"
+    vars:
+      task_id: "review-003"
+      repo_name: "user-service"
+      in_scope: "src/models/user.py"
+      out_of_scope: "src/auth/"
+      diff_content: |
+        --- a/src/models/user.py
+        +++ b/src/models/user.py
+        @@ -10,3 +10,8 @@
+         class User:
+             name: str
+             email: str
+        +    password: str
+        +
+        +    def check_password(self, plain):
+        +        return self.password == plain
+      context: "Adding password field to User model"
+    assert:
+      - type: llm-rubric
+        value: "The review flags plaintext password comparison as a critical security issue and recommends using proper password hashing (bcrypt, argon2, etc)."
+      - type: contains-any
+        value: ["hash", "plaintext", "security", "bcrypt", "password", "argon"]
+
+  # TC-4: Approve a clean, well-implemented change
+  - description: "Approve a clean utility function addition"
+    vars:
+      task_id: "review-004"
+      repo_name: "utils-lib"
+      in_scope: "src/utils/string_helpers.py"
+      out_of_scope: "src/billing/"
+      definition_of_done: "New utility function is implemented with docstring and type hints."
+      diff_content: |
+        --- a/src/utils/string_helpers.py
+        +++ b/src/utils/string_helpers.py
+        @@ -5,3 +5,10 @@
+         def slugify(text: str) -> str:
+             return re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')
+        +
+        +
+        +def truncate(text: str, max_length: int = 100, suffix: str = "...") -> str:
+        +    """Truncate text to max_length, appending suffix if truncated."""
+        +    if len(text) <= max_length:
+        +        return text
+        +    return text[:max_length - len(suffix)] + suffix
+      context: "Adding string truncation utility"
+    assert:
+      - type: llm-rubric
+        value: "The review approves this as a clean, well-implemented utility function with proper type hints and docstring."
+      - type: not-contains
+        value: "rejected"
+
+  # TC-5: Detect missing error handling
+  - description: "Flag missing error handling in file operation"
+    vars:
+      task_id: "review-005"
+      repo_name: "file-processor"
+      in_scope: "src/io/reader.py"
+      out_of_scope: "src/database/"
+      diff_content: |
+        --- a/src/io/reader.py
+        +++ b/src/io/reader.py
+        @@ -8,6 +8,12 @@
+         class FileReader:
+             def __init__(self, base_path: str):
+                 self.base_path = base_path
+        +
+        +    def read_config(self, filename: str) -> dict:
+        +        path = os.path.join(self.base_path, filename)
+        +        with open(path) as f:
+        +            data = json.load(f)
+        +        return data
+      context: "Adding config file reader"
+    assert:
+      - type: llm-rubric
+        value: "The review flags missing error handling: no try/except for FileNotFoundError or json.JSONDecodeError, no path traversal protection for the filename parameter."
+      - type: contains-any
+        value: ["error handling", "exception", "FileNotFoundError", "try", "path traversal", "validation"]
+
+  # TC-6: Detect scope violation in diff
+  - description: "Flag modification of out-of-scope file in the diff"
+    vars:
+      task_id: "review-006"
+      repo_name: "api-service"
+      in_scope: "src/api/routes.py"
+      out_of_scope: "src/database/models.py, src/auth/"
+      diff_content: |
+        --- a/src/api/routes.py
+        +++ b/src/api/routes.py
+        @@ -10,3 +10,6 @@
+         def get_users():
+             return UserService.list_all()
+        +
+        +def get_admin_users():
+        +    return UserService.list_admins()
+        --- a/src/database/models.py
+        +++ b/src/database/models.py
+        @@ -20,3 +20,6 @@
+         class User(Base):
+             __tablename__ = 'users'
+        +    is_admin = Column(Boolean, default=False)
+      context: "Adding admin user endpoint"
+    assert:
+      - type: llm-rubric
+        value: "The review detects that src/database/models.py is in the out_of_scope list but was modified, and flags this as a critical boundary violation warranting rejection."
+      - type: contains-any
+        value: ["boundary", "violation", "scope", "models.py", "out_of_scope", "rejected"]
+
+  # TC-7: Detect N+1 query pattern
+  - description: "Flag potential N+1 query performance issue"
+    vars:
+      task_id: "review-007"
+      repo_name: "user-service"
+      in_scope: "src/services/report.py"
+      out_of_scope: ""
+      diff_content: |
+        --- a/src/services/report.py
+        +++ b/src/services/report.py
+        @@ -15,6 +15,12 @@
+         class ReportService:
+             def __init__(self, db: Database):
+                 self.db = db
+        +
+        +    def generate_user_report(self) -> list[dict]:
+        +        users = self.db.query(User).all()
+        +        results = []
+        +        for user in users:
+        +            orders = self.db.query(Order).filter_by(user_id=user.id).all()
+        +            results.append({"user": user.name, "order_count": len(orders)})
+        +        return results
+      context: "Adding user report generation"
+    assert:
+      - type: llm-rubric
+        value: "The review identifies the N+1 query pattern (querying orders inside a loop over users) as a performance issue and suggests using a JOIN or eager loading."
+      - type: contains-any
+        value: ["N+1", "performance", "query", "loop", "join", "eager"]
