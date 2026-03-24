@@ -43,6 +43,14 @@ class OpenAIProvider(LLMProvider):
         return self._async_client
 
     @staticmethod
+    def _max_tokens_param(model: str) -> str:
+        """Newer OpenAI models use 'max_completion_tokens' instead of 'max_tokens'."""
+        # gpt-5.x, o-series, and future models use the new param
+        if any(model.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")):
+            return "max_completion_tokens"
+        return "max_tokens"
+
+    @staticmethod
     def _strip_prefix(model: str) -> str:
         """'openai/gpt-5.4-mini' → 'gpt-5.4-mini'"""
         return model.split("/", 1)[1] if "/" in model else model
@@ -58,10 +66,13 @@ class OpenAIProvider(LLMProvider):
         client = self._get_client()
         api_model = self._strip_prefix(model)
 
+        # Newer OpenAI models (gpt-5.x, o-series) use max_completion_tokens
+        token_param = self._max_tokens_param(api_model)
+
         call_kwargs: dict[str, Any] = {
             "model": api_model,
             "messages": messages,
-            "max_tokens": max_tokens,
+            token_param: max_tokens,
             "temperature": temperature,
         }
         # Forward extra kwargs (e.g. tools, tool_choice) to the OpenAI API
@@ -91,10 +102,12 @@ class OpenAIProvider(LLMProvider):
         client = self._get_async_client()
         api_model = self._strip_prefix(model)
 
+        token_param = self._max_tokens_param(api_model)
+
         call_kwargs: dict[str, Any] = {
             "model": api_model,
             "messages": messages,
-            "max_tokens": max_tokens,
+            token_param: max_tokens,
             "temperature": temperature,
         }
         # Forward extra kwargs (e.g. tools, tool_choice) to the OpenAI API
