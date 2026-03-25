@@ -95,6 +95,103 @@ def format_campaign_preview(task_id: str, content: str) -> str:
     )
 
 
+def format_task_lifecycle_complete(task_id: str, summary: dict[str, Any]) -> str:
+    """Compact completion message: summary-first, no code dumps."""
+    parts = [f"✅ *{escape_markdown(task_id)} completed*"]
+
+    worker_summary = summary.get("summary", "")
+    if worker_summary:
+        parts.append(escape_markdown(str(worker_summary)[:200]))
+
+    changed = summary.get("changed_files")
+    if changed:
+        parts.append(f"📁 *Changed files:* {escape_markdown(str(changed))}")
+
+    tests = summary.get("tests")
+    if tests is not None:
+        icon = "✅" if tests else "❌"
+        label = "passed" if tests else "failed"
+        parts.append(f"{icon} *Tests:* {escape_markdown(label)}")
+
+    branch = summary.get("branch")
+    if branch:
+        parts.append(f"🌿 *Branch:* {escape_markdown(str(branch))}")
+
+    return "\n".join(parts)
+
+
+def format_task_lifecycle_failed(task_id: str, error: str) -> str:
+    """Compact failure message with inspect hint."""
+    tid = escape_markdown(task_id)
+    return (
+        f"❌ *{tid} failed*\n\n"
+        f"*Reason:* {escape_markdown(str(error)[:300])}\n\n"
+        f"_Use /details {tid} to inspect\\._"
+    )
+
+
+def format_task_details(
+    task_id: str,
+    manifest: dict[str, Any],
+    evals: dict[str, Any] | None = None,
+    plan: dict[str, Any] | None = None,
+) -> str:
+    """Detailed task view for /details command (pull-based verbosity)."""
+    parts = [f"*📋 Task {escape_markdown(task_id)}*\n"]
+
+    if manifest:
+        parts.append(f"*Type:* {escape_markdown(manifest.get('task_type', '?'))}")
+        parts.append(f"*Created:* {escape_markdown(manifest.get('created_at', '?'))}")
+        desc = manifest.get("description", "")
+        if desc:
+            parts.append(f"*Description:* {escape_markdown(desc[:200])}")
+        project = manifest.get("project_name")
+        if project:
+            parts.append(f"*Project:* {escape_markdown(project)}")
+
+    if plan:
+        steps = plan.get("plan_steps", [])
+        confidence = plan.get("confidence", 0)
+        skill = plan.get("selected_skill", "")
+        parts.append(
+            f"\n*Plan* \\(confidence: {escape_markdown(f'{confidence:.0%}')}\\)"
+        )
+        if skill:
+            parts.append(f"*Skill:* {escape_markdown(skill)}")
+        for i, step in enumerate(steps[:5], 1):
+            action = escape_markdown(str(step.get("action", "?"))[:80])
+            parts.append(f"  {i}\\. {action}")
+        if len(steps) > 5:
+            remaining = escape_markdown(str(len(steps) - 5))
+            parts.append(f"  _\\.\\.\\.and {remaining} more_")
+
+    if evals:
+        det = evals.get("deterministic_verdict", {})
+        if det:
+            passed = det.get("passed", False)
+            icon = "✅" if passed else "❌"
+            parts.append(f"\n*Validation:* {icon}")
+            for check in det.get("checks", []):
+                c_icon = "✅" if check.get("passed") else "❌"
+                parts.append(
+                    f"  {c_icon} {escape_markdown(check.get('check', '?'))}"
+                )
+
+        review = evals.get("review_verdict")
+        if review:
+            verdict = review.get("verdict", "?")
+            conf = review.get("confidence", 0)
+            parts.append(
+                f"\n*Review:* {escape_markdown(verdict)} "
+                f"\\(confidence: {escape_markdown(f'{conf:.0%}')}\\)"
+            )
+
+    msg = "\n".join(parts)
+    if len(msg) > 4000:
+        msg = msg[:3950] + "\n\n_\\(truncated\\)_"
+    return msg
+
+
 def _progress_bar(pct: float, width: int = 10) -> str:
     """Render a text-based progress bar."""
     filled = int(pct / 100 * width)

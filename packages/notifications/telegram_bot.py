@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-import re
 import os
 from pathlib import Path
 from typing import Any
@@ -21,9 +22,13 @@ from packages.notifications.formatters import (
     format_approval_request,
     format_budget_summary,
     format_campaign_preview,
+    format_task_details,
+    format_task_lifecycle_complete,
+    format_task_lifecycle_failed,
     format_task_status,
 )
 from packages.config import (
+    find_task_dir,
     get_harness_root,
     get_project_paths,
     iter_registered_projects,
@@ -41,11 +46,13 @@ class TelegramNotifier:
         allowed_chat_ids: list[int],
         task_state_manager: Any,
         sqlite_store: Any,
+        project_name: str | None = None,
     ) -> None:
         self._token = token
         self._allowed_chat_ids = set(allowed_chat_ids)
         self._tsm = task_state_manager
         self._store = sqlite_store
+        self._project_name = project_name
         self._app: Application | None = None  # type: ignore[type-arg]
 
     # ------------------------------------------------------------------
@@ -82,15 +89,17 @@ class TelegramNotifier:
         self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(CommandHandler("budget", self._cmd_budget))
         self._app.add_handler(CommandHandler("task", self._cmd_task))
+        self._app.add_handler(CommandHandler("details", self._cmd_details))
+        self._app.add_handler(CommandHandler("diff", self._cmd_diff))
 
-        # Inline callback handler (approve/reject buttons)
+        # Inline callback handler (approve/reject/details buttons)
         self._app.add_handler(CallbackQueryHandler(self._callback_handler))
 
         logger.info("Starting Telegram bot polling...")
         self._app.run_polling()
 
     # ------------------------------------------------------------------
-    # Outbound notifications
+    # Outbound notifications (compact lifecycle format)
     # ------------------------------------------------------------------
 
     async def notify(
@@ -111,21 +120,30 @@ class TelegramNotifier:
         )
 
     async def notify_task_complete(self, task_id: str) -> None:
+        """Send a compact completion notification to all allowed chats."""
         task = self._store.get_task(task_id)
         if task is None:
             return
-        msg = f"✅ *Task {escape_markdown(task_id)} completed\\!*\n\n"
-        msg += format_task_status(task)
-        for chat_id in self._allowed_chat_ids:
-            await self.notify(chat_id, msg)
-
-    async def notify_task_failed(self, task_id: str, error: str) -> None:
-        msg = (
-            f"❌ *Task {escape_markdown(task_id)} failed*\n\n"
-            f"*Error:* {escape_markdown(error)}"
+        summary = {
+            "status": task.get("status", "done"),
+            "summary": task.get("description", "Task completed."),
+            "branch": task.get("branch"),
+        }
+        msg = format_task_lifecycle_complete(task_id, summary)
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📋 Details", callback_data=f"details:{task_id}")]]
         )
         for chat_id in self._allowed_chat_ids:
-            await self.notify(chat_id, msg)
+            await self.notify(chat_id, msg, reply_markup=keyboard)
+
+    async def notify_task_failed(self, task_id: str, error: str) -> None:
+        """Send a compact failure notification to all allowed chats."""
+        msg = format_task_lifecycle_failed(task_id, error)
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📋 Details", callback_data=f"details:{task_id}")]]
+        )
+        for chat_id in self._allowed_chat_ids:
+            await self.notify(chat_id, msg, reply_markup=keyboard)
 
     async def notify_approval_needed(self, task_id: str, summary: str) -> None:
         """Send an approval request with inline approve/reject buttons."""
@@ -243,7 +261,10 @@ class TelegramNotifier:
                 await update.message.reply_text(f"Task {task_id} not found.")  # type: ignore[union-attr]
                 return
             msg = format_task_status(task)
-            await update.message.reply_text(msg, parse_mode="MarkdownV2")  # type: ignore[union-attr]
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("📋 Details", callback_data=f"details:{task_id}")]]
+            )
+            await update.message.reply_text(msg, parse_mode="MarkdownV2", reply_markup=keyboard)  # type: ignore[union-attr]
         else:
             tasks = self._store.list_tasks()
             if not tasks:
@@ -285,7 +306,7 @@ class TelegramNotifier:
     async def _cmd_task(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Handle ``/task "description"``."""
+        """Handle ``/task "description"`` — submit to the real orchestrator."""
         if not await self._check_auth(update):
             return
         args = context.args or []
@@ -294,25 +315,181 @@ class TelegramNotifier:
             return
 
         description = " ".join(args).strip('"')
-        # Generate a simple task id
-        import uuid
 
-        task_id = f"TASK-{uuid.uuid4().hex[:6].upper()}"
+        if not self._project_name:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "No project bound. Set TELEGRAM_PROJECT or register a project."
+            )
+            return
 
-        self._tsm.create_task_dir(task_id)
-        self._store.create_task(
-            {
-                "task_id": task_id,
-                "title": description[:80],
-                "description": description,
-                "status": "pending",
-            }
-        )
-        self._tsm.write_state(task_id, {"status": "pending", "description": description})
-
+        # Acknowledge immediately — orchestrator runs in background
         await update.message.reply_text(  # type: ignore[union-attr]
-            f"Created task {task_id}: {description}"
+            f"Submitting task to project {self._project_name}..."
         )
+
+        chat_id = update.effective_chat.id  # type: ignore[union-attr]
+        asyncio.create_task(self._execute_and_notify(chat_id, description))
+
+    async def _execute_and_notify(self, chat_id: int, description: str) -> None:
+        """Run the full orchestrator pipeline and send a compact result."""
+        from apps.orchestrator.main import run_task
+
+        try:
+            result = await run_task(
+                description=description,
+                project_name=self._project_name,
+            )
+            task_id = result.get("task_id", "unknown")
+            status = result.get("status", "unknown")
+
+            if status == "done":
+                summary = self._build_summary(result)
+                msg = format_task_lifecycle_complete(task_id, summary)
+            elif status in ("failed", "learned"):
+                error = result.get("error") or f"Ended with status: {status}"
+                msg = format_task_lifecycle_failed(task_id, error)
+            else:
+                msg = (
+                    f"*{escape_markdown(task_id)}* finished\n"
+                    f"*Status:* {escape_markdown(status)}"
+                )
+
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("📋 Details", callback_data=f"details:{task_id}")]]
+            )
+            await self.notify(chat_id, msg, reply_markup=keyboard)
+        except Exception as exc:
+            logger.exception("Orchestrator submission failed")
+            try:
+                error_msg = (
+                    f"❌ *Task submission failed*\n\n"
+                    f"{escape_markdown(str(exc)[:300])}"
+                )
+                await self.notify(chat_id, error_msg)
+            except Exception:
+                logger.exception("Failed to send error notification")
+
+    @staticmethod
+    def _build_summary(result: dict[str, Any]) -> dict[str, Any]:
+        """Extract a compact summary dict from the orchestrator result."""
+        eval_results = result.get("eval_results") or {}
+        artifacts = result.get("artifacts", [])
+        changed_files = sum(1 for a in artifacts if a.get("type") == "diff")
+        return {
+            "status": result.get("status", "done"),
+            "summary": eval_results.get("worker_summary", "Task completed."),
+            "changed_files": changed_files or None,
+            "tests": eval_results.get("tests_passed"),
+            "branch": result.get("branch"),
+        }
+
+    async def _cmd_details(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle ``/details TASK-ID`` — pull-based verbose task view."""
+        if not await self._check_auth(update):
+            return
+        args = context.args or []
+        if not args:
+            await update.message.reply_text("Usage: /details TASK-ID")  # type: ignore[union-attr]
+            return
+
+        task_id = args[0]
+        msg = self._load_and_format_details(task_id)
+        if msg is None:
+            await update.message.reply_text(f"Task {task_id} not found.")  # type: ignore[union-attr]
+            return
+        await update.message.reply_text(msg, parse_mode="MarkdownV2")  # type: ignore[union-attr]
+
+    async def _cmd_diff(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle ``/diff TASK-ID`` — show diff artifacts on demand."""
+        if not await self._check_auth(update):
+            return
+        args = context.args or []
+        if not args:
+            await update.message.reply_text("Usage: /diff TASK-ID")  # type: ignore[union-attr]
+            return
+
+        task_id = args[0]
+        located = find_task_dir(task_id, project_name=self._project_name)
+        if not located:
+            await update.message.reply_text(f"Task {task_id} not found.")  # type: ignore[union-attr]
+            return
+
+        _proj, task_dir = located
+        artifacts_dir = task_dir / "artifacts"
+        if not artifacts_dir.is_dir():
+            await update.message.reply_text(f"No artifacts for {task_id}.")  # type: ignore[union-attr]
+            return
+
+        diffs: list[dict[str, Any]] = []
+        for p in sorted(artifacts_dir.glob("artifact_*.json")):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if data.get("type") == "diff":
+                    diffs.append(data)
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        if not diffs:
+            await update.message.reply_text(f"No diff artifacts for {task_id}.")  # type: ignore[union-attr]
+            return
+
+        # Plain text to avoid MarkdownV2 escaping issues with diff content
+        lines = [f"Diffs for {task_id}:\n"]
+        for d in diffs[:10]:
+            file_path = d.get("path", "?")
+            lines.append(f"--- {file_path}")
+            content = d.get("content", "")
+            if content:
+                preview_lines = content.splitlines()[:15]
+                lines.extend(preview_lines)
+                if len(content.splitlines()) > 15:
+                    lines.append("... (truncated)")
+            lines.append("")
+
+        msg = "\n".join(lines)
+        if len(msg) > 4000:
+            msg = msg[:3950] + "\n\n(truncated)"
+
+        await update.message.reply_text(msg)  # type: ignore[union-attr]
+
+    def _load_and_format_details(self, task_id: str) -> str | None:
+        """Load task data from filesystem and format as a details message."""
+        located = find_task_dir(task_id, project_name=self._project_name)
+        if not located:
+            return None
+
+        _proj, task_dir = located
+
+        manifest: dict[str, Any] = {}
+        plan: dict[str, Any] = {}
+        evals: dict[str, Any] = {}
+
+        manifest_path = task_dir / "manifest.json"
+        if manifest_path.is_file():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        plan_path = task_dir / "plan.json"
+        if plan_path.is_file():
+            try:
+                plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        eval_path = task_dir / "evals" / "validation.json"
+        if eval_path.is_file():
+            try:
+                evals = json.loads(eval_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        return format_task_details(task_id, manifest, evals, plan)
 
     # ------------------------------------------------------------------
     # Inline callback handler
@@ -366,6 +543,13 @@ class TelegramNotifier:
             self._tsm.write_state(task_id, state)
             self._store.update_task_status(task_id, "rejected")
             await query.edit_message_text(f"Campaign for {task_id} rejected.")
+
+        elif action == "details":
+            msg = self._load_and_format_details(task_id)
+            if msg:
+                await query.edit_message_text(msg, parse_mode="MarkdownV2")
+            else:
+                await query.edit_message_text(f"Task {task_id} not found.")
 
 
 def _resolve_path(value: str, base: Path) -> Path:
@@ -467,6 +651,7 @@ def main() -> None:
         allowed_chat_ids=allowed_ids,
         task_state_manager=tsm,
         sqlite_store=store,
+        project_name=project_name,
     )
 
     logger.info("Starting Telegram bot...")
