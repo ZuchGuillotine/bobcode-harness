@@ -119,3 +119,35 @@ def test_write_feedback_export_updates_export_state(
     assert state["last_exported_line"] == 2
     assert state["last_exported_at"] == "2026-03-24T10:00:00+00:00"
 
+
+def test_build_feedback_export_omits_local_paths_from_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness_root = tmp_path / "harness"
+    community_dir = harness_root / "data" / "community"
+    community_dir.mkdir(parents=True)
+    (harness_root / "config").mkdir(parents=True)
+    (harness_root / "config" / "harness.yaml").write_text(
+        "\n".join([
+            "harness:",
+            "  data_dir: data",
+            "community_feedback:",
+            "  consent: anonymized_export",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    (community_dir / "feedback_events.jsonl").write_text(
+        '{"task_type":"code_change"}\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HARNESS_HOME", str(harness_root))
+
+    bundle = build_feedback_export()
+
+    assert bundle["event_count"] == 1
+    assert "log_path" not in bundle["summary"]
+    assert "export_dir" not in bundle["summary"]
+    assert "state_file" not in bundle["summary"]
+    assert "consent_updated_by" not in bundle["summary"]

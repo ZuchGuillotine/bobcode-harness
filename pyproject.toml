@@ -37,6 +37,22 @@ harness-ctl = "apps.orchestrator.cli:main"
 [project.entry-points."apps.orchestrator"]
 main = "apps.orchestrator.main:main"
 
+[tool.hatch.build.targets.wheel]
+packages = ["apps", "packages"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/apps",
+    "/packages",
+    "/config",
+    "/evals",
+    "/prompts",
+    "/scripts",
+    "/skills",
+    "/README.md",
+    "/LICENSE",
+]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100

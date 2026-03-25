@@ -106,6 +106,20 @@ def summarize_feedback_status() -> dict[str, Any]:
     }
 
 
+def summarize_feedback_export_status() -> dict[str, Any]:
+    """Return a share-safe feedback summary for export bundles."""
+    status = summarize_feedback_status()
+    return {
+        "consent": status["consent"],
+        "export_enabled": status["export_enabled"],
+        "total_events": status["total_events"],
+        "pending_events": status["pending_events"],
+        "exported_events": status["exported_events"],
+        "consent_updated_at": status["consent_updated_at"],
+        "last_exported_at": status["last_exported_at"],
+    }
+
+
 def build_feedback_export(
     include_all: bool = False,
     limit: int | None = None,
@@ -131,7 +145,7 @@ def build_feedback_export(
         "event_count": len(selected_events),
         "line_range": [selected[0][0], last_line] if selected else [],
         "events": selected_events,
-        "summary": summarize_feedback_status(),
+        "summary": summarize_feedback_export_status(),
     }
 
 

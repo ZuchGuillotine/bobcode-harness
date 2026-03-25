@@ -50,7 +50,9 @@ The planner routes through Claude Code CLI to use your Max subscription for expe
 git clone https://github.com/ZuchGuillotine/bobcode-harness.git
 cd agent-harness
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
+# For local development and tests:
+# pip install -e '.[dev]'
 npm install -g @optave/codegraph
 ```
 
@@ -94,6 +96,8 @@ Or via Telegram:
 ```
 /task "refactor the auth module to use JWT tokens"
 ```
+
+For now, the CLI is the primary verified task submission path. The Telegram bot deployment and project binding were validated on a VPS pilot, but the richer Telegram-driven task lifecycle is still being hardened.
 
 ### 5. Monitor
 
@@ -262,6 +266,10 @@ The Telegram bot provides human-in-the-loop control:
 | `/budget` | Show cost usage |
 
 Campaign previews and approval requests are sent with inline buttons.
+
+For multi-project installs, bind the bot to a registered project with `notifications.telegram.project` in `config/harness.yaml` or `TELEGRAM_PROJECT=<name>`. If exactly one project is registered, the bot auto-selects it; otherwise it falls back to legacy/global state.
+
+The currently validated operating pattern is one bot per project. In a VPS pilot, project-bound polling, bot authentication, and direct message delivery were verified against a registered project repo and authorized chat ID.
 
 ## Repo Intelligence (codegraph)
 

@@ -1,6 +1,6 @@
 # bobcode-harness — Project Status
 
-**Last Updated:** 2026-03-24
+**Last Updated:** 2026-03-25
 **Phase:** 1 (Core Loop) — Near Complete
 **Repo:** https://github.com/ZuchGuillotine/bobcode-harness
 
@@ -77,6 +77,15 @@
 - [x] `harness-ctl feedback` — Consent, status, and export flow for anonymized community feedback bundles
 - [x] Per-project isolation (separate SQLite, learning data, eval outputs, worktrees, config overrides; codegraph builds by default and is kept untracked via `.gitignore` or `.git/info/exclude`)
 
+### Session Validation (2026-03-25)
+- [x] Editable install path fixed (`pip install -e .` / `pip install -e '.[dev]'`) via explicit Hatch package targets
+- [x] Runtime data-dir resolution fixed so configured `harness.data_dir` no longer resolves to `data/data/...`
+- [x] Community feedback export bundles sanitized to omit local file-path metadata in exported summaries
+- [x] Telegram bot can bind to a registered project's per-project SQLite/task paths
+- [x] External-mode registration verified on a live git repo (repo-local `.codegraph/graph.db`, `.git/info/exclude`, harness-owned `data/projects/<project>/...`)
+- [x] Consent/status/export flow verified with anonymized bundle output
+- [x] VPS Telegram deployment verified for real bot auth, authorized chat delivery, and project-bound polling
+
 ### Tests (60 passing)
 - [x] `tests/unit/test_sqlite_store.py` — 10 tests
 - [x] `tests/unit/test_budget.py` — 10 tests
@@ -103,13 +112,18 @@
 
 #### Bugs / Fixes
 - [x] **LLM Router rate limit retry/backoff** — 5 retries with exponential backoff (2s → 32s) on 429 errors
+- [x] **Editable install packaging** — Hatch build targets added so `pip install -e .` works for the repo layout
+- [x] **Runtime path resolution** — `harness.data_dir` now resolves relative to harness root instead of duplicating `data/data/...`
+- [x] **Feedback export privacy** — Export bundle summaries no longer leak local log/export/state file paths
+- [x] **Telegram project binding** — Bot can target a registered project's per-project runtime state instead of legacy/global paths
 - [ ] **Plan step key alignment** — Opus returns `plan_steps` with rich objects but validator expects specific structure; parser needs to be more flexible
 - [ ] **Worker/Reviewer Claude Code CLI routing** — Same Max plan benefit as planner; reduces API spend
 - [ ] **CodegraphAdapter CLI interface alignment** — Adapter needs update for optave v3.3.1 commands (`where`, `context`, `fn-impact`, `search`)
 
 #### Integration Testing
 - [ ] Live budget enforcement test (kill over-budget task)
-- [ ] Telegram bot command verification
+- [x] Telegram bot VPS auth/send/project-binding smoke test
+- [ ] Telegram task submission/completion lifecycle verification
 - [ ] Run Promptfoo regression suite
 - [ ] Run red-team adversarial suite
 

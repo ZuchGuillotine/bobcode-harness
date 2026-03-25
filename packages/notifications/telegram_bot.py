@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import re
+import os
+from pathlib import Path
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -20,6 +22,11 @@ from packages.notifications.formatters import (
     format_budget_summary,
     format_campaign_preview,
     format_task_status,
+)
+from packages.config import (
+    get_harness_root,
+    get_project_paths,
+    iter_registered_projects,
 )
 
 logger = logging.getLogger(__name__)
@@ -361,13 +368,53 @@ class TelegramNotifier:
             await query.edit_message_text(f"Campaign for {task_id} rejected.")
 
 
+def _resolve_path(value: str, base: Path) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (base / path).resolve()
+
+
+def _resolve_telegram_project(
+    config: dict[str, Any],
+    env: dict[str, str] | None = None,
+) -> str | None:
+    """Resolve which registered project the Telegram bot should manage."""
+    env = env or os.environ
+    telegram_cfg = config.get("notifications", {}).get("telegram", {})
+
+    explicit = (
+        env.get("TELEGRAM_PROJECT")
+        or env.get("HARNESS_PROJECT")
+        or telegram_cfg.get("project")
+        or telegram_cfg.get("default_project")
+    )
+    if explicit:
+        return str(explicit)
+
+    registered = [name for name, _path in iter_registered_projects()]
+    if len(registered) == 1:
+        return registered[0]
+
+    return None
+
+
+def _resolve_legacy_sqlite_path(
+    config: dict[str, Any],
+    env: dict[str, str] | None = None,
+) -> Path:
+    """Resolve the legacy/global SQLite path for Telegram fallback mode."""
+    env = env or os.environ
+    configured = env.get("HARNESS_DB") or config.get("database", {}).get("sqlite_path") or "data/sqlite/harness.db"
+    return _resolve_path(str(configured), get_harness_root())
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint (for running as systemd service)
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     """Boot the Telegram bot from environment config."""
-    import os
     import yaml
 
     logging.basicConfig(
@@ -384,6 +431,7 @@ def main() -> None:
     config_dir = os.environ.get("HARNESS_CONFIG", "config")
     harness_cfg_path = os.path.join(config_dir, "harness.yaml")
     allowed_ids: list[int] = []
+    cfg: dict[str, Any] = {}
     try:
         with open(harness_cfg_path) as f:
             cfg = yaml.safe_load(f) or {}
@@ -394,9 +442,25 @@ def main() -> None:
     from packages.state.sqlite_store import SQLiteStore
     from packages.state.task_state import TaskStateManager
 
-    db_path = os.environ.get("HARNESS_DB", "data/sqlite/harness.db")
-    store = SQLiteStore(db_path)
-    tsm = TaskStateManager()
+    project_name = _resolve_telegram_project(cfg)
+    if project_name:
+        project_paths = get_project_paths(project_name=project_name)
+        store = SQLiteStore(str(project_paths.db_path))
+        tsm = TaskStateManager(tasks_dir=str(project_paths.tasks_dir))
+        logger.info(
+            "Telegram bot bound to project=%s db=%s tasks_dir=%s",
+            project_name,
+            project_paths.db_path,
+            project_paths.tasks_dir,
+        )
+    else:
+        db_path = _resolve_legacy_sqlite_path(cfg)
+        store = SQLiteStore(str(db_path))
+        tsm = TaskStateManager()
+        logger.warning(
+            "Telegram bot running in legacy/global mode. "
+            "Set TELEGRAM_PROJECT or notifications.telegram.project to bind a registered project."
+        )
 
     bot = TelegramNotifier(
         token=token,

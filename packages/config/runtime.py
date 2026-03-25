@@ -62,7 +62,9 @@ def get_data_dir() -> Path:
 
     cfg = load_harness_config()
     configured = cfg.get("harness", {}).get("data_dir")
-    return _resolve_path(configured, root / "data")
+    if configured:
+        return _resolve_path(str(configured), root)
+    return root / "data"
 
 
 def get_community_dir() -> Path:
