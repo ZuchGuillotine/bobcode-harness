@@ -1,0 +1,74 @@
+# Promptfoo regression tests for creative_scoring_v1 skill
+# Run: npx promptfoo eval -c evals/marketing/test_creative_scoring.yaml
+
+description: "Regression tests for creative_scoring_v1 skill"
+
+prompts:
+  - |
+    {{system_prompt}}
+
+    Review the following creative pack:
+
+    Objective: {{objective}}
+    Audience: {{audience}}
+    Offer: {{offer}}
+    Assets:
+    {{assets}}
+
+providers:
+  - id: anthropic:messages:claude-sonnet-4-20250514
+    config:
+      temperature: 0.1
+      max_tokens: 4500
+
+defaultTest:
+  vars:
+    system_prompt: |
+      You are the Reviewer. You score each creative asset against explicit criteria.
+      You identify the highest-leverage weaknesses, flag policy or brand risks, and recommend what to test next.
+      Skill loaded: creative_scoring_v1
+  options:
+    transformVars: "{ ...vars }"
+
+tests:
+  - description: "Penalize vague CTA and buried offer"
+    vars:
+      objective: "drive demo requests"
+      audience: "IT managers at growing SaaS companies"
+      offer: "cloud cost optimization platform"
+      assets: |
+        Asset A: "Cloud spend is rising. Teams everywhere are under pressure. Modern businesses need clarity. Learn more."
+        Asset B: "See which workloads are wasting budget in 15 minutes. Book a live cloud cost review."
+    assert:
+      - type: llm-rubric
+        value: "The response ranks Asset B above Asset A, flags that Asset A buries the offer and has a weak CTA, and explains the reasons rather than only giving scores."
+      - type: contains-any
+        value: ["CTA", "offer", "rank", "test"]
+
+  - description: "Flag risky absolute claim language"
+    vars:
+      objective: "increase signups"
+      audience: "small ecommerce brands"
+      offer: "returns management software"
+      assets: |
+        Asset A: "Eliminate every return problem instantly."
+        Asset B: "Reduce return chaos with clearer workflows and faster status updates."
+    assert:
+      - type: llm-rubric
+        value: "The response flags Asset A as claim-risky due to absolute language and recognizes Asset B as more defensible."
+      - type: contains-any
+        value: ["risk", "claim", "absolute", "defensible"]
+
+  - description: "Recommend discard when a variant is clearly weak"
+    vars:
+      objective: "purchase conversion"
+      audience: "runners shopping for recovery tools"
+      offer: "compact massage gun"
+      assets: |
+        Asset A: "Massage gun."
+        Asset B: "Post-run soreness? Get deep tissue relief without hauling a full-size device."
+    assert:
+      - type: llm-rubric
+        value: "The response identifies Asset A as too weak to test without revision, recommends prioritizing Asset B, and suggests a concrete next experiment."
+      - type: contains-any
+        value: ["discard", "revise", "prioritize", "experiment"]

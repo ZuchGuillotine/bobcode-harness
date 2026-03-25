@@ -1,0 +1,75 @@
+# Promptfoo regression tests for seo_content_v1 skill
+# Run: npx promptfoo eval -c evals/marketing/test_seo_content.yaml
+
+description: "Regression tests for seo_content_v1 skill"
+
+prompts:
+  - |
+    {{system_prompt}}
+
+    Create an SEO content response for the following request:
+
+    Topic: {{topic}}
+    Audience: {{audience}}
+    Offer: {{offer}}
+    Goal: {{goal}}
+    Existing metrics: {{existing_metrics}}
+    Brand constraints: {{brand_constraints}}
+
+providers:
+  - id: anthropic:messages:claude-sonnet-4-20250514
+    config:
+      temperature: 0.1
+      max_tokens: 5000
+
+defaultTest:
+  vars:
+    system_prompt: |
+      You are the Worker. You create search-informed marketing drafts from bounded plans.
+      You identify intent before drafting, include metadata and structure, and check claims against the brief.
+      Skill loaded: seo_content_v1
+  options:
+    transformVars: "{ ...vars }"
+
+tests:
+  - description: "Match commercial-intent keyword to landing page format"
+    vars:
+      topic: "best payroll software for construction companies"
+      audience: "operations managers at 20-200 employee construction firms"
+      offer: "construction-specific payroll platform with union rules and job-costing support"
+      goal: "book a demo"
+      existing_metrics: "Current blog traffic is strong, but demo conversion rate from organic is low."
+      brand_constraints: "No unsupported claims like 'guaranteed compliance'. Confident but not hype-heavy."
+    assert:
+      - type: llm-rubric
+        value: "The response identifies high commercial intent, recommends a landing or comparison-style page rather than a generic blog post, includes title/meta/header structure, and uses a demo-focused CTA."
+      - type: contains-any
+        value: ["meta", "H1", "H2", "CTA", "demo"]
+
+  - description: "Avoid unsupported claims in regulated content"
+    vars:
+      topic: "how telehealth follow-up works after an urgent care visit"
+      audience: "busy parents comparing urgent care options"
+      offer: "urgent care chain with online follow-up scheduling"
+      goal: "schedule a visit"
+      existing_metrics: "High search impressions on informational queries, moderate page engagement."
+      brand_constraints: "Do not claim medical outcomes, guaranteed recovery, or doctor availability without proof."
+    assert:
+      - type: llm-rubric
+        value: "The response avoids unsupported medical claims, keeps the content informational, includes a compliant CTA, and explicitly respects the brand constraints."
+      - type: not-contains
+        value: "guaranteed recovery"
+
+  - description: "Recommend refresh when existing page is already ranking"
+    vars:
+      topic: "restaurant inventory checklist"
+      audience: "multi-location restaurant operators"
+      offer: "inventory and food-cost management software"
+      goal: "download a template"
+      existing_metrics: "Page already ranks in positions 4-6 for the head term but has a low organic CTR and weak conversion rate."
+      brand_constraints: "Practical tone. No inflated ROI claims."
+    assert:
+      - type: llm-rubric
+        value: "The response recognizes that this may be a refresh opportunity, suggests title/meta/intro optimization, and ties the content to a template-download CTA."
+      - type: contains-any
+        value: ["refresh", "CTR", "template", "download"]

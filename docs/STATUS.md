@@ -139,10 +139,16 @@
 - [ ] Google Ads, GA4, GSC, X/Twitter, LinkedIn MCP connections + OAuth
 
 #### Marketing Skills & Evals
-- [ ] `skills/marketing/seo_content.v1.md` — SEO content skill
-- [ ] `skills/marketing/social_campaign.v1.md` — Social campaign skill
-- [ ] `evals/marketing/test_seo_content.yaml`
-- [ ] `evals/marketing/test_social_campaign.yaml`
+- [x] `skills/marketing/seo_content.v1.md` — SEO content skill
+- [x] `skills/marketing/social_campaign.v1.md` — Social campaign skill
+- [x] `skills/marketing/customer_segmentation.v1.md` — Audience segmentation + messaging matrix skill
+- [x] `skills/marketing/creative_scoring.v1.md` — Preflight scoring and risk review skill
+- [x] `skills/marketing/performance_report.v1.md` — Performance analysis and next-test skill
+- [x] `evals/marketing/test_seo_content.yaml`
+- [x] `evals/marketing/test_social_campaign.yaml`
+- [x] `evals/marketing/test_customer_segmentation.yaml`
+- [x] `evals/marketing/test_creative_scoring.yaml`
+- [x] `evals/marketing/test_performance_report.yaml`
 - [ ] `packages/eval/marketing_eval.py` — Campaign performance evaluation
 
 #### DeepEval Integration
@@ -283,15 +289,16 @@ All queries are local (SQLite + embeddings). Zero API calls, zero tokens consume
 
 ## File Inventory
 
-**~83 files delivered** across all phases.
+**~93 files delivered** across all phases.
 
 ```
 apps/orchestrator/          14 files  (complete for Phase 1)
 packages/                   23 files  (complete for Phase 1; includes provider adapters; +5 for Phase 3 learning)
 config/                      5 files  (complete; +per-project overrides as projects are added)
-skills/code/                 3 files  (complete; +marketing skills in Phase 2)
+skills/code/                 3 files  (complete)
+skills/marketing/            5 files  (base OSS marketing skills)
 prompts/                    12 files  (complete; +skill_maintainer persona in Phase 3)
-evals/                       3 files  (complete for Phase 1; +marketing evals in Phase 2)
+evals/                       8 files  (code regressions + adversarial + marketing regressions)
 scripts/                     3 files  (complete)
 docs/                        1 file   (this file; +architecture, runbooks, ADRs pending)
 tests/                       9 files  (60 tests passing)
@@ -306,10 +313,6 @@ apps/marketing_adapter/registry.py
 apps/marketing_adapter/tools.py
 apps/marketing_adapter/metrics_collector.py
 packages/eval/marketing_eval.py
-skills/marketing/seo_content.v1.md
-skills/marketing/social_campaign.v1.md
-evals/marketing/test_seo_content.yaml
-evals/marketing/test_social_campaign.yaml
 ```
 
 **Phase 3 — Self-Improvement:**
@@ -364,13 +367,13 @@ docs/ADRs/003_codegraph_as_primary_repo_intel.md
 | Prompt loader | Complete | 1 | — |
 | CLI (harness-ctl) | 8 commands | 1 | — |
 | Project registry | Complete (register, projects) | 1 | — |
-| Skills | 3 code skills | 3 | 14 promptfoo cases |
+| Skills | 3 code skills + 5 marketing skills | 8 | 29 promptfoo cases |
 | Prompts | 12 files (3 agents × 4 files) | 12 | 16 red-team cases |
 | Config | 5 files | 5 | — |
 | Scripts | setup, deploy, backup | 3 | — |
 | Tests | 60 passing | 9 | — |
 | README + LICENSE | Complete | 2 | — |
-| **Total** | | **~83** | **60** |
+| **Total** | | **~93** | **60** |
 
 ### What's Not Shipped Yet
 
@@ -383,8 +386,8 @@ docs/ADRs/003_codegraph_as_primary_repo_intel.md
 | Skill Maintainer agent | 3 | Needs improvement proposer | 5 |
 | Canary rollout | 3 | Needs skill versioning | 1 |
 | Marketing adapter (MCP) | 2 | Needs platform OAuth setup | 3 |
-| Marketing skills | 2 | Needs marketing adapter | 2 |
-| Marketing evals | 2 | Needs marketing skills | 3 |
+| Marketing skills | 2 | Base OSS skill library drafted; adapter wiring still pending | 5 |
+| Marketing evals | 2 | Promptfoo suites added; metrics-based evaluator still pending | 1 |
 | DeepEval integration | 2 | Needs failure data | 2 |
 | Documentation (runbooks, ADRs) | Ongoing | — | 7 |
 

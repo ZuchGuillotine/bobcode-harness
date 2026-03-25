@@ -153,7 +153,7 @@ agent-harness/                    ← Installed once on your VPS
 
 4. **Per-project config.** Override model routing, budget limits, skills, and prompts per project. A high-stakes production repo might use Opus for all roles; a side project might use only GPT-5.4-mini.
 
-5. **Base skills + project skills.** The harness ships with base skills (safe_refactor, bug_trace, review_diff). Projects can define additional skills in `AGENTS.md` or in a `skills/` directory within the project repo.
+5. **Base skills + project skills.** The harness ships with base code skills (`safe_refactor`, `bug_trace`, `review_diff`) and base marketing skills (`seo_content`, `social_campaign`, `customer_segmentation`, `creative_scoring`, `performance_report`). Projects can define additional skills in `AGENTS.md` or in a `skills/` directory within the project repo.
 
 6. **Worktrees for safety.** The harness never modifies your main branch directly. All changes happen in isolated git worktrees. You review and merge.
 
@@ -416,6 +416,7 @@ agent-harness/
 │   ├── eval/                # Deterministic checks, promptfoo runner
 │   └── notifications/       # Telegram bot, message formatters
 ├── skills/code/             # Base code skills (refactor, bug trace, review)
+├── skills/marketing/        # Base marketing skills (content, campaign, scoring, reporting)
 ├── prompts/                 # Agent personas (planner, worker, reviewer)
 ├── evals/                   # Promptfoo regression + red-team configs
 ├── config/                  # Model routing, harness config, eval config

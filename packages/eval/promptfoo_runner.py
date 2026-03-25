@@ -196,6 +196,10 @@ class PromptfooRunner:
             f"regressions/{clean_name}.yaml",
             f"regressions/test_{clean_name}.yml",
             f"regressions/{clean_name}.yml",
+            f"marketing/test_{clean_name}.yaml",
+            f"marketing/{clean_name}.yaml",
+            f"marketing/test_{clean_name}.yml",
+            f"marketing/{clean_name}.yml",
         ]
 
         for candidate in candidates:

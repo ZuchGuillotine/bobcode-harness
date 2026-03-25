@@ -1,0 +1,75 @@
+# Promptfoo regression tests for social_campaign_v1 skill
+# Run: npx promptfoo eval -c evals/marketing/test_social_campaign.yaml
+
+description: "Regression tests for social_campaign_v1 skill"
+
+prompts:
+  - |
+    {{system_prompt}}
+
+    Build a social campaign response from this brief:
+
+    Offer: {{offer}}
+    Audience: {{audience}}
+    Objective: {{objective}}
+    Platforms: {{platforms}}
+    Constraints: {{constraints}}
+    Historical context: {{historical_context}}
+
+providers:
+  - id: anthropic:messages:claude-sonnet-4-20250514
+    config:
+      temperature: 0.1
+      max_tokens: 5000
+
+defaultTest:
+  vars:
+    system_prompt: |
+      You are the Worker. You turn a marketing brief into platform-aware campaign drafts without publishing anything.
+      You define the campaign angle first, adapt copy per platform, and return a structured test matrix.
+      Skill loaded: social_campaign_v1
+  options:
+    transformVars: "{ ...vars }"
+
+tests:
+  - description: "Adapt copy across platforms instead of repeating one caption"
+    vars:
+      offer: "AI note-taking assistant for sales calls"
+      audience: "startup sales teams with 5-50 reps"
+      objective: "book free trials"
+      platforms: "LinkedIn feed, Meta feed, Instagram Stories"
+      constraints: "Avoid the phrase 'never take notes again'. Confident B2B tone."
+      historical_context: "Past winners led with time saved and CRM hygiene."
+    assert:
+      - type: llm-rubric
+        value: "The response defines one coherent campaign angle, then adapts copy separately for LinkedIn, Meta, and Instagram Stories rather than duplicating one version."
+      - type: contains-any
+        value: ["LinkedIn", "Meta", "Stories", "test matrix"]
+
+  - description: "Use policy-safe phrasing for a financial product"
+    vars:
+      offer: "expense-management card for small businesses"
+      audience: "owners worried about cash flow and team spend"
+      objective: "drive applications"
+      platforms: "Meta feed, X"
+      constraints: "Do not promise guaranteed approval or savings. Avoid predatory urgency language."
+      historical_context: "Previous creative with customer proof outperformed abstract feature lists."
+    assert:
+      - type: llm-rubric
+        value: "The response avoids guaranteed approval or savings claims, includes proof-oriented hooks, and returns platform-aware variants plus a clear test matrix."
+      - type: not-contains
+        value: "guaranteed approval"
+
+  - description: "Respect organic context when objective is awareness"
+    vars:
+      offer: "behind-the-scenes maker video for a specialty coffee brand"
+      audience: "existing fans and curious new followers"
+      objective: "awareness"
+      platforms: "Instagram Reels, X thread"
+      constraints: "Friendly voice. No hard-sell CTA."
+      historical_context: "Audience responds best to process detail and founder voice."
+    assert:
+      - type: llm-rubric
+        value: "The response uses awareness-appropriate CTAs, keeps the tone organic rather than direct-response-heavy, and formats output for Reels and an X thread."
+      - type: contains-any
+        value: ["Reels", "thread", "awareness"]

@@ -1,0 +1,63 @@
+# Promptfoo regression tests for performance_report_v1 skill
+# Run: npx promptfoo eval -c evals/marketing/test_performance_report.yaml
+
+description: "Regression tests for performance_report_v1 skill"
+
+prompts:
+  - |
+    {{system_prompt}}
+
+    Analyze this performance snapshot:
+
+    Objective: {{objective}}
+    Date range: {{date_range}}
+    Data: {{data}}
+
+providers:
+  - id: anthropic:messages:claude-sonnet-4-20250514
+    config:
+      temperature: 0.1
+      max_tokens: 4500
+
+defaultTest:
+  vars:
+    system_prompt: |
+      You are the Reviewer. You convert marketing performance data into decision-ready reporting.
+      You align analysis to the goal metric, flag fatigue, and state attribution caveats when the evidence is incomplete.
+      Skill loaded: performance_report_v1
+  options:
+    transformVars: "{ ...vars }"
+
+tests:
+  - description: "Prioritize conversion efficiency over raw clicks"
+    vars:
+      objective: "qualified demo bookings"
+      date_range: "Last 14 days vs prior 14 days"
+      data: "Campaign A: 1200 clicks, 18 demos, CPA $210. Campaign B: 700 clicks, 26 demos, CPA $95."
+    assert:
+      - type: llm-rubric
+        value: "The response identifies Campaign B as the stronger performer despite fewer clicks, because it drives more demos at a lower CPA, and recommends an action based on that."
+      - type: contains-any
+        value: ["CPA", "demo", "scale", "stronger"]
+
+  - description: "Flag fatigue from decaying engagement efficiency"
+    vars:
+      objective: "paid social purchases"
+      date_range: "Past 21 days"
+      data: "Creative X frequency rose from 1.8 to 4.9, CTR fell from 1.7% to 0.8%, CPA rose from $42 to $79. Creative Y remained stable."
+    assert:
+      - type: llm-rubric
+        value: "The response flags Creative X as fatigued, distinguishes it from stable Creative Y, and recommends refresh or replacement testing."
+      - type: contains-any
+        value: ["fatigue", "frequency", "CTR", "refresh"]
+
+  - description: "State attribution caveat when only directional analytics exist"
+    vars:
+      objective: "organic-assisted revenue"
+      date_range: "QTD"
+      data: "Blog traffic up 38%, email signups up 12%, direct revenue attribution unavailable, sales team reports more branded search mentions."
+    assert:
+      - type: llm-rubric
+        value: "The response notes directional positive signals but avoids claiming precise attribution, explicitly mentioning uncertainty or caveats."
+      - type: contains-any
+        value: ["directional", "attribution", "caveat", "uncertain"]

@@ -1,0 +1,67 @@
+# Promptfoo regression tests for customer_segmentation_v1 skill
+# Run: npx promptfoo eval -c evals/marketing/test_customer_segmentation.yaml
+
+description: "Regression tests for customer_segmentation_v1 skill"
+
+prompts:
+  - |
+    {{system_prompt}}
+
+    Build a customer segmentation response from this brief:
+
+    Product: {{product}}
+    Market: {{market}}
+    Objective: {{objective}}
+    Known signals: {{known_signals}}
+
+providers:
+  - id: anthropic:messages:claude-sonnet-4-20250514
+    config:
+      temperature: 0.1
+      max_tokens: 4500
+
+defaultTest:
+  vars:
+    system_prompt: |
+      You are the Worker. You create practical customer segment maps and messaging matrices.
+      You prioritize segments, distinguish them clearly, and map keywords and messaging to each one.
+      Skill loaded: customer_segmentation_v1
+  options:
+    transformVars: "{ ...vars }"
+
+tests:
+  - description: "Differentiate buyer roles in a B2B workflow product"
+    vars:
+      product: "procurement workflow software for mid-market manufacturers"
+      market: "North America"
+      objective: "define initial ICP and messaging"
+      known_signals: "Ops leaders care about cycle time; finance leaders care about approval control and auditability."
+    assert:
+      - type: llm-rubric
+        value: "The response creates distinct segments such as operations and finance rather than one generic B2B persona, prioritizes them, and gives different pains, proof points, and CTAs."
+      - type: contains-any
+        value: ["operations", "finance", "priority", "messaging"]
+
+  - description: "Map search intent by segment for consumer health product"
+    vars:
+      product: "at-home physical therapy app"
+      market: "US adults recovering from common injuries"
+      objective: "build persona-led content strategy"
+      known_signals: "Some users are price-sensitive self-serve researchers; others want clinician-backed reassurance."
+    assert:
+      - type: llm-rubric
+        value: "The response separates at least two meaningful segments, maps keyword or content intent to each, and avoids generic demographic-only personas."
+      - type: contains-any
+        value: ["keyword", "intent", "objection", "proof"]
+
+  - description: "State uncertainty instead of overclaiming when evidence is thin"
+    vars:
+      product: "new AI scheduling tool for independent consultants"
+      market: "global English-speaking market"
+      objective: "draft early segmentation hypothesis"
+      known_signals: "Very limited data beyond founder interviews."
+    assert:
+      - type: llm-rubric
+        value: "The response marks rankings as provisional or hypothesis-driven, still provides useful segment candidates, and identifies the key data gaps to validate next."
+      - type: contains-any
+        value: ["provisional", "hypothesis", "data gap", "validate"]

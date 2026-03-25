@@ -68,6 +68,48 @@ def test_promptfoo_runner_ignores_legacy_repo_local_output_dir(
     assert runner._output_dir == harness_root / "data" / "projects" / "demo-repo" / "eval_outputs"
 
 
+def test_promptfoo_runner_resolves_marketing_suite_by_skill_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness_root = tmp_path / "harness"
+    (harness_root / "config").mkdir(parents=True)
+    (harness_root / "evals" / "marketing").mkdir(parents=True)
+    repo_path = tmp_path / "demo-repo"
+    repo_path.mkdir()
+
+    (harness_root / "config" / "harness.yaml").write_text(
+        "harness:\n  data_dir: data\n",
+        encoding="utf-8",
+    )
+    (harness_root / "config" / "eval_config.yaml").write_text(
+        "eval:\n  promptfoo:\n    config_dir: evals\n",
+        encoding="utf-8",
+    )
+    (harness_root / "evals" / "marketing" / "test_seo_content.yaml").write_text(
+        "description: test\nprompts: ['x']\nproviders: []\ntests: []\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HARNESS_HOME", str(harness_root))
+
+    runner = PromptfooRunner(repo_path=str(repo_path))
+
+    called: dict[str, str] = {}
+
+    def fake_run_suite(suite_name: str, output_format: str = "json") -> dict[str, str]:
+        called["suite_name"] = suite_name
+        called["output_format"] = output_format
+        return {"suite_name": suite_name}
+
+    monkeypatch.setattr(runner, "run_suite", fake_run_suite)
+
+    result = runner.run_regression("seo_content")
+
+    assert result["suite_name"] == "marketing/test_seo_content.yaml"
+    assert called["suite_name"] == "marketing/test_seo_content.yaml"
+
+
 def test_build_feedback_event_excludes_repo_specific_fields() -> None:
     state = {
         "task_type": "code_change",
