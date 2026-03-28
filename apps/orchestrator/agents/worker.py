@@ -8,6 +8,8 @@ import logging
 import os
 from typing import Any
 
+from packages.browser_daemon import BrowserDaemonClient
+from packages.config import ProjectPaths, get_project_paths
 from packages.llm.prompt_loader import PromptLoader
 from packages.llm.router import LLMRouter
 from packages.repo_intel.codegraph_adapter import CodegraphAdapter
@@ -125,6 +127,106 @@ WORKER_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "browser_status",
+            "description": "Read current browser daemon status for the project.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_goto",
+            "description": "Navigate the project browser to a URL.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_snapshot",
+            "description": "Capture a textual page snapshot with interactive refs.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_screenshot",
+            "description": "Capture a full-page screenshot artifact.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_click",
+            "description": "Click an interactive element by browser snapshot ref.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ref": {"type": "string"},
+                },
+                "required": ["ref"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_type",
+            "description": "Type into an interactive element by browser snapshot ref.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ref": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+                "required": ["ref", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_console",
+            "description": "Read recent browser console entries.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_network",
+            "description": "Read recent browser network errors and failed responses.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "repo_intel_get_candidate_tests",
             "description": "Find test files relevant to the changed files.",
             "parameters": {
@@ -173,14 +275,18 @@ class WorkerAgent:
     def __init__(
         self,
         worktree_path: str | None = None,
+        project_paths: ProjectPaths | None = None,
         llm_router: LLMRouter | None = None,
     ) -> None:
         self.role = "worker"
         self.worktree_path = os.path.realpath(worktree_path or ".")
+        self.project_paths = project_paths or get_project_paths(repo_path=self.worktree_path)
         self._prompt_loader = PromptLoader()
         self._llm_router = llm_router or LLMRouter()
         self._codegraph = CodegraphAdapter(repo_path=self.worktree_path)
         self._system_prompt = self._load_prompt()
+        self._browser = BrowserDaemonClient(self.project_paths)
+        self._pending_browser_artifacts: list[dict[str, Any]] = []
 
     def _load_prompt(self) -> str:
         """Load prompt via PromptLoader; fall back to builtin."""
@@ -298,7 +404,8 @@ class WorkerAgent:
 
             # Final response
             content = response.content or ""
-            return self._parse_result(content, task_id)
+            parsed = self._parse_result(content, task_id)
+            return self._merge_pending_browser_artifacts(parsed)
 
         logger.warning("Worker exhausted tool-use rounds for task %s", task_id)
         return {
@@ -327,6 +434,14 @@ class WorkerAgent:
             "shell_run": self._tool_shell_run,
             "git_diff": self._tool_git_diff,
             "git_apply_patch": self._tool_git_apply_patch,
+            "browser_status": self._tool_browser_status,
+            "browser_goto": self._tool_browser_goto,
+            "browser_snapshot": self._tool_browser_snapshot,
+            "browser_screenshot": self._tool_browser_screenshot,
+            "browser_click": self._tool_browser_click,
+            "browser_type": self._tool_browser_type,
+            "browser_console": self._tool_browser_console,
+            "browser_network": self._tool_browser_network,
             "repo_intel_get_context": self._tool_repo_intel_get_context,
             "repo_intel_get_candidate_tests": self._tool_repo_intel_get_candidate_tests,
         }
@@ -432,6 +547,58 @@ class WorkerAgent:
         )
         return {"success": result.returncode == 0, "output": result.stdout, "error": result.stderr}
 
+    def _tool_browser_status(self) -> dict[str, Any]:
+        return self._browser.health()
+
+    def _tool_browser_goto(self, url: str) -> dict[str, Any]:
+        result = self._browser.command("goto", [url])
+        return result.result if result.ok else {"error": result.error or "browser goto failed"}
+
+    def _tool_browser_snapshot(self) -> dict[str, Any]:
+        result = self._browser.command("snapshot")
+        if not result.ok:
+            return {"error": result.error or "browser snapshot failed"}
+        snapshot = {
+            "type": "browser_snapshot",
+            "path": "",
+            "content": result.result.get("text", ""),
+            "url": result.result.get("current_url", ""),
+        }
+        self._pending_browser_artifacts.append(snapshot)
+        return result.result
+
+    def _tool_browser_screenshot(self, name: str = "browser-shot") -> dict[str, Any]:
+        result = self._browser.command("screenshot", [name])
+        if not result.ok:
+            return {"error": result.error or "browser screenshot failed"}
+        artifact = {
+            "type": "browser_evidence",
+            "path": result.result.get("artifact_path", ""),
+            "content": "",
+            "metadata": {
+                "url": result.result.get("current_url", ""),
+                "source": "browser_screenshot",
+            },
+        }
+        self._pending_browser_artifacts.append(artifact)
+        return result.result
+
+    def _tool_browser_click(self, ref: str) -> dict[str, Any]:
+        result = self._browser.command("click", [ref])
+        return result.result if result.ok else {"error": result.error or "browser click failed"}
+
+    def _tool_browser_type(self, ref: str, text: str) -> dict[str, Any]:
+        result = self._browser.command("type", [ref, text])
+        return result.result if result.ok else {"error": result.error or "browser type failed"}
+
+    def _tool_browser_console(self) -> dict[str, Any]:
+        result = self._browser.command("console")
+        return result.result if result.ok else {"error": result.error or "browser console failed"}
+
+    def _tool_browser_network(self) -> dict[str, Any]:
+        result = self._browser.command("network")
+        return result.result if result.ok else {"error": result.error or "browser network failed"}
+
     # --- Repo-intel tool handlers (backed by CodegraphAdapter) ---
 
     def _tool_repo_intel_get_context(self, file_path: str, symbol_name: str | None = None) -> dict[str, Any]:
@@ -469,3 +636,20 @@ class WorkerAgent:
                 "tests_passed": False,
                 "summary": f"Worker output for {task_id} was not valid JSON.",
             }
+
+    def _merge_pending_browser_artifacts(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Ensure browser evidence captured during tool use is preserved."""
+        if not self._pending_browser_artifacts:
+            return result
+
+        artifacts = list(result.get("artifacts", []))
+        existing_paths = {
+            (artifact.get("type"), artifact.get("path"), artifact.get("content"))
+            for artifact in artifacts
+        }
+        for artifact in self._pending_browser_artifacts:
+            key = (artifact.get("type"), artifact.get("path"), artifact.get("content"))
+            if key not in existing_paths:
+                artifacts.append(artifact)
+        result["artifacts"] = artifacts
+        return result

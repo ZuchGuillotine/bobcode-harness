@@ -1,0 +1,13 @@
+{
+  "name": "harness-browser-daemon",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Local browser daemon sidecar for the agent harness",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "playwright": "^1.58.2"
+  }
+}

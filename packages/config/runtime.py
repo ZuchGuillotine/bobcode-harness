@@ -115,6 +115,11 @@ class ProjectPaths:
     skills_dir: Path
     worktree_base: Path
     eval_output_dir: Path
+    browser_dir: Path
+    browser_state_file: Path
+    browser_artifacts_dir: Path
+    browser_console_log: Path
+    browser_network_log: Path
     legacy_mode: bool = False
 
     def ensure_dirs(self) -> None:
@@ -125,6 +130,8 @@ class ProjectPaths:
         self.skills_dir.mkdir(parents=True, exist_ok=True)
         self.worktree_base.mkdir(parents=True, exist_ok=True)
         self.eval_output_dir.mkdir(parents=True, exist_ok=True)
+        self.browser_dir.mkdir(parents=True, exist_ok=True)
+        self.browser_artifacts_dir.mkdir(parents=True, exist_ok=True)
 
 
 def get_project_paths(
@@ -151,6 +158,11 @@ def get_project_paths(
             skills_dir=project_dir / "skills",
             worktree_base=project_dir / "worktrees",
             eval_output_dir=project_dir / "eval_outputs",
+            browser_dir=project_dir / "browser",
+            browser_state_file=project_dir / "browser" / "daemon.json",
+            browser_artifacts_dir=project_dir / "browser" / "artifacts",
+            browser_console_log=project_dir / "browser" / "console.log",
+            browser_network_log=project_dir / "browser" / "network.log",
             legacy_mode=False,
         )
 
@@ -170,6 +182,11 @@ def get_project_paths(
             skills_dir=project_dir / "skills",
             worktree_base=project_dir / "worktrees",
             eval_output_dir=project_dir / "eval_outputs",
+            browser_dir=project_dir / "browser",
+            browser_state_file=project_dir / "browser" / "daemon.json",
+            browser_artifacts_dir=project_dir / "browser" / "artifacts",
+            browser_console_log=project_dir / "browser" / "console.log",
+            browser_network_log=project_dir / "browser" / "network.log",
             legacy_mode=False,
         )
 
@@ -185,6 +202,11 @@ def get_project_paths(
         skills_dir=legacy_dir / "skills",
         worktree_base=legacy_dir / "worktrees",
         eval_output_dir=legacy_dir / "eval_outputs",
+        browser_dir=legacy_dir / "browser",
+        browser_state_file=legacy_dir / "browser" / "daemon.json",
+        browser_artifacts_dir=legacy_dir / "browser" / "artifacts",
+        browser_console_log=legacy_dir / "browser" / "console.log",
+        browser_network_log=legacy_dir / "browser" / "network.log",
         legacy_mode=True,
     )
 

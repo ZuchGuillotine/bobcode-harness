@@ -7,6 +7,8 @@ import logging
 import os
 from typing import Any
 
+from packages.browser_daemon import BrowserDaemonClient
+from packages.config import ProjectPaths, get_project_paths
 from packages.llm.prompt_loader import PromptLoader
 from packages.llm.router import LLMRouter
 from packages.repo_intel.codegraph_adapter import CodegraphAdapter
@@ -32,6 +34,53 @@ REVIEWER_TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["files"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_status",
+            "description": "Read current browser daemon status.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_console_read",
+            "description": "Read recent browser console entries.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_network_read",
+            "description": "Read recent browser network failures and error responses.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_artifact_read",
+            "description": "Read a browser artifact file captured during execution.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                },
+                "required": ["path"],
             },
         },
     },
@@ -111,14 +160,17 @@ class ReviewerAgent:
     def __init__(
         self,
         worktree_path: str | None = None,
+        project_paths: ProjectPaths | None = None,
         llm_router: LLMRouter | None = None,
     ) -> None:
         self.role = "reviewer"
         self.worktree_path = worktree_path or "."
+        self.project_paths = project_paths or get_project_paths(repo_path=self.worktree_path)
         self._prompt_loader = PromptLoader()
         self._llm_router = llm_router or LLMRouter()
         self._codegraph = CodegraphAdapter(repo_path=self.worktree_path)
         self._system_prompt = self._load_prompt()
+        self._browser = BrowserDaemonClient(self.project_paths)
 
     def _load_prompt(self) -> str:
         """Load prompt via PromptLoader; fall back to builtin."""
@@ -260,6 +312,14 @@ class ReviewerAgent:
             return self._tool_diff_read(artifacts, args.get("file_path"))
         if tool_name == "test_results_read":
             return self._tool_test_results_read(artifacts, args.get("suite"))
+        if tool_name == "browser_status":
+            return self._tool_browser_status()
+        if tool_name == "browser_console_read":
+            return self._tool_browser_console_read()
+        if tool_name == "browser_network_read":
+            return self._tool_browser_network_read()
+        if tool_name == "browser_artifact_read":
+            return self._tool_browser_artifact_read(args.get("path", ""))
         if tool_name == "repo_intel_get_boundary_violations":
             return self._tool_boundary_violations(args.get("files", []))
         if tool_name == "repo_intel_get_impact":
@@ -310,6 +370,44 @@ class ReviewerAgent:
                     except OSError:
                         pass
         return {"test_results": results}
+
+    def _tool_browser_status(self) -> dict[str, Any]:
+        return self._browser.health()
+
+    def _tool_browser_console_read(self) -> dict[str, Any]:
+        result = self._browser.command("console")
+        return result.result if result.ok else {"error": result.error or "browser console failed"}
+
+    def _tool_browser_network_read(self) -> dict[str, Any]:
+        result = self._browser.command("network")
+        return result.result if result.ok else {"error": result.error or "browser network failed"}
+
+    def _tool_browser_artifact_read(self, path: str) -> dict[str, Any]:
+        if not path:
+            return {"error": "Artifact path is required"}
+
+        full_path = os.path.realpath(path)
+        allowed_root = os.path.realpath(str(self.project_paths.browser_dir))
+        try:
+            common = os.path.commonpath([full_path, allowed_root])
+        except ValueError:
+            return {"error": f"Artifact path outside browser runtime: {path}"}
+        if common != allowed_root:
+            return {"error": f"Artifact path outside browser runtime: {path}"}
+        if not os.path.isfile(full_path):
+            return {"error": f"Artifact not found: {path}"}
+
+        try:
+            with open(full_path, "rb") as fh:
+                content = fh.read(2048)
+        except OSError as exc:
+            return {"error": str(exc)}
+
+        return {
+            "path": path,
+            "size_bytes": os.path.getsize(full_path),
+            "preview_text": content.decode("utf-8", errors="replace"),
+        }
 
     def _tool_boundary_violations(self, files: list[str]) -> dict[str, Any]:
         """Check boundary violations via CodegraphAdapter."""

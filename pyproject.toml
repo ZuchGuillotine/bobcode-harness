@@ -49,6 +49,7 @@ include = [
     "/prompts",
     "/scripts",
     "/skills",
+    "/tools",
     "/README.md",
     "/LICENSE",
 ]

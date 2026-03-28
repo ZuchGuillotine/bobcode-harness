@@ -69,7 +69,11 @@ def execute_node(state: dict[str, Any]) -> dict[str, Any]:
 
     # --- Invoke Worker ---
     llm_router = LLMRouter()
-    worker = WorkerAgent(worktree_path=worktree_path, llm_router=llm_router)
+    worker = WorkerAgent(
+        worktree_path=worktree_path,
+        project_paths=project_paths,
+        llm_router=llm_router,
+    )
 
     try:
         try:

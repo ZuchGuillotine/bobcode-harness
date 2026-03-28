@@ -170,7 +170,14 @@ def _invoke_reviewer(
 
     worktree_path = state.get("worktree_path") or state.get("repo_path") or "."
     llm_router = LLMRouter()
-    reviewer = ReviewerAgent(worktree_path=worktree_path, llm_router=llm_router)
+    reviewer = ReviewerAgent(
+        worktree_path=worktree_path,
+        project_paths=get_project_paths(
+            project_name=state.get("project_name"),
+            repo_path=state.get("repo_path"),
+        ),
+        llm_router=llm_router,
+    )
 
     try:
         try:
