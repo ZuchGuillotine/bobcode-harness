@@ -76,18 +76,10 @@ def execute_node(state: dict[str, Any]) -> dict[str, Any]:
     )
 
     try:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                result = pool.submit(asyncio.run, worker.execute(plan, state)).result()
-        else:
-            result = asyncio.run(worker.execute(plan, state))
+        # LangGraph nodes are synchronous; bridge to async.
+        # We're always in a plain thread (via asyncio.to_thread in run_task),
+        # so asyncio.run() is safe and avoids nested-loop deadlocks.
+        result = asyncio.run(worker.execute(plan, state))
     except Exception as exc:
         logger.exception("Worker failed for task %s — cleaning up worktree", task_id)
         try:

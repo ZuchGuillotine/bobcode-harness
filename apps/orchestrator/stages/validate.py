@@ -180,20 +180,10 @@ def _invoke_reviewer(
     )
 
     try:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                return pool.submit(
-                    asyncio.run, reviewer.review(artifacts, plan, state)
-                ).result()
-        else:
-            return asyncio.run(reviewer.review(artifacts, plan, state))
+        # LangGraph nodes are synchronous; bridge to async.
+        # We're always in a plain thread (via asyncio.to_thread in run_task),
+        # so asyncio.run() is safe and avoids nested-loop deadlocks.
+        return asyncio.run(reviewer.review(artifacts, plan, state))
     except Exception as exc:
         logger.exception("Reviewer failed for task %s", state.get("task_id"))
         return {

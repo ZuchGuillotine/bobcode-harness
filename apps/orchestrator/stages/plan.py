@@ -82,20 +82,13 @@ def plan_node(state: dict[str, Any]) -> dict[str, Any]:
     planner = PlannerAgent(repo_path=repo_path, llm_router=llm_router)
 
     try:
-        # LangGraph nodes are synchronous; bridge to async
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            # We're inside an async context — use nest_asyncio or thread
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                plan = pool.submit(asyncio.run, planner.plan(state)).result()
-        else:
-            plan = asyncio.run(planner.plan(state))
+        # LangGraph nodes are synchronous; bridge to async.
+        # When invoked via asyncio.to_thread (e.g. from the Telegram bot),
+        # we're in a plain thread with no running event loop, so
+        # asyncio.run() is safe.  The previous pattern of spawning a
+        # ThreadPoolExecutor from within an already-threaded call caused
+        # deadlocks and silent failures.
+        plan = asyncio.run(planner.plan(state))
     except Exception as exc:
         logger.exception("Planner failed for task %s", task_id)
         return {

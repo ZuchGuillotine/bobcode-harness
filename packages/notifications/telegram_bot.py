@@ -332,6 +332,8 @@ class TelegramNotifier:
 
     async def _execute_and_notify(self, chat_id: int, description: str) -> None:
         """Run the full orchestrator pipeline and send a compact result."""
+        import traceback as _tb
+
         from apps.orchestrator.main import run_task
 
         try:
@@ -360,14 +362,30 @@ class TelegramNotifier:
             await self.notify(chat_id, msg, reply_markup=keyboard)
         except Exception as exc:
             logger.exception("Orchestrator submission failed")
+            # Send the full traceback so VPS operators can diagnose via Telegram
+            tb_text = _tb.format_exc()
+            logger.error("Full traceback:\n%s", tb_text)
             try:
+                # Include exception type and condensed traceback for diagnostics
+                exc_type = type(exc).__name__
+                short_tb = "\n".join(tb_text.strip().splitlines()[-4:])
                 error_msg = (
                     f"❌ *Task submission failed*\n\n"
-                    f"{escape_markdown(str(exc)[:300])}"
+                    f"*{escape_markdown(exc_type)}:* "
+                    f"{escape_markdown(str(exc)[:200])}\n\n"
+                    f"`{escape_markdown(short_tb[:300])}`"
                 )
                 await self.notify(chat_id, error_msg)
             except Exception:
                 logger.exception("Failed to send error notification")
+                # Last-resort plain text notification
+                try:
+                    await self._app.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"Task failed: {exc}",
+                    )
+                except Exception:
+                    pass
 
     @staticmethod
     def _build_summary(result: dict[str, Any]) -> dict[str, Any]:
@@ -597,6 +615,49 @@ def _resolve_legacy_sqlite_path(
 # Entrypoint (for running as systemd service)
 # ---------------------------------------------------------------------------
 
+def _run_startup_diagnostics(
+    cfg: dict[str, Any],
+    allowed_ids: list[int],
+    project_name: str | None,
+) -> None:
+    """Print actionable diagnostics so VPS operators can spot misconfig fast."""
+    issues: list[str] = []
+
+    if not allowed_ids:
+        issues.append(
+            "allowed_chat_ids is EMPTY — all commands will be rejected as 'Unauthorized'. "
+            "Add your Telegram chat ID to config/harness.yaml under "
+            "notifications.telegram.allowed_chat_ids (use @userinfobot to find your ID)."
+        )
+
+    if not project_name:
+        issues.append(
+            "No project bound — /task will fail with 'No project bound'. "
+            "Fix: set TELEGRAM_PROJECT env var, or add notifications.telegram.project "
+            "to harness.yaml, or register exactly one project under config/projects/."
+        )
+    else:
+        # Verify the project is actually registered
+        try:
+            get_project_paths(project_name=project_name)
+        except ValueError:
+            issues.append(
+                f"Project '{project_name}' is set but NOT registered. "
+                f"Create config/projects/{project_name}.yaml or add it to "
+                f"harness.yaml under 'projects:'. /task will fail with "
+                f"'Unknown project: {project_name}'."
+            )
+
+    if issues:
+        logger.warning("=" * 60)
+        logger.warning("STARTUP DIAGNOSTICS — %d issue(s) found:", len(issues))
+        for i, issue in enumerate(issues, 1):
+            logger.warning("  [%d] %s", i, issue)
+        logger.warning("=" * 60)
+    else:
+        logger.info("Startup diagnostics passed — bot is correctly configured.")
+
+
 def main() -> None:
     """Boot the Telegram bot from environment config."""
     import yaml
@@ -627,8 +688,24 @@ def main() -> None:
     from packages.state.task_state import TaskStateManager
 
     project_name = _resolve_telegram_project(cfg)
+
+    # --- Startup diagnostics ---
+    _run_startup_diagnostics(cfg, allowed_ids, project_name)
+
+    if project_name:
+        try:
+            project_paths = get_project_paths(project_name=project_name)
+        except ValueError:
+            logger.error(
+                "Project '%s' is not registered. Create config/projects/%s.yaml "
+                "or add it under 'projects:' in harness.yaml. Falling back to legacy mode.",
+                project_name, project_name,
+            )
+            project_name = None
+
     if project_name:
         project_paths = get_project_paths(project_name=project_name)
+        project_paths.ensure_dirs()
         store = SQLiteStore(str(project_paths.db_path))
         tsm = TaskStateManager(tasks_dir=str(project_paths.tasks_dir))
         logger.info(
