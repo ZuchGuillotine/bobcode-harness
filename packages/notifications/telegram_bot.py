@@ -9,12 +9,16 @@ import os
 from pathlib import Path
 from typing import Any
 
+from collections import deque
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from packages.notifications.formatters import (
@@ -40,6 +44,11 @@ logger = logging.getLogger(__name__)
 class TelegramNotifier:
     """Telegram bot for agent-harness notifications and commands."""
 
+    # Max exchanges (user+assistant pairs) to keep per chat
+    _CHAT_HISTORY_SIZE = 5
+    # Telegram message limit
+    _MAX_MESSAGE_LEN = 4096
+
     def __init__(
         self,
         token: str,
@@ -47,13 +56,17 @@ class TelegramNotifier:
         task_state_manager: Any,
         sqlite_store: Any,
         project_name: str | None = None,
+        llm_router: Any | None = None,
     ) -> None:
         self._token = token
         self._allowed_chat_ids = set(allowed_chat_ids)
         self._tsm = task_state_manager
         self._store = sqlite_store
         self._project_name = project_name
+        self._llm_router = llm_router
         self._app: Application | None = None  # type: ignore[type-arg]
+        # Rolling chat history per chat_id: deque of {"role": ..., "content": ...}
+        self._chat_history: dict[int, deque[dict[str, str]]] = {}
 
     # ------------------------------------------------------------------
     # Authorization
@@ -91,6 +104,11 @@ class TelegramNotifier:
         self._app.add_handler(CommandHandler("task", self._cmd_task))
         self._app.add_handler(CommandHandler("details", self._cmd_details))
         self._app.add_handler(CommandHandler("diff", self._cmd_diff))
+
+        # Freeform conversational handler (must come after commands)
+        self._app.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_chat)
+        )
 
         # Inline callback handler (approve/reject/details buttons)
         self._app.add_handler(CallbackQueryHandler(self._callback_handler))
@@ -390,6 +408,118 @@ class TelegramNotifier:
             "branch": result.get("branch"),
         }
 
+    # ------------------------------------------------------------------
+    # Conversational chat (freeform text)
+    # ------------------------------------------------------------------
+
+    def _get_chat_history(self, chat_id: int) -> deque[dict[str, str]]:
+        """Return (or create) the rolling history deque for a chat."""
+        if chat_id not in self._chat_history:
+            self._chat_history[chat_id] = deque(maxlen=self._CHAT_HISTORY_SIZE * 2)
+        return self._chat_history[chat_id]
+
+    def _gather_task_context(self) -> str:
+        """Pull recent tasks, failures, and routing suggestions into a text block."""
+        sections: list[str] = []
+
+        # Recent tasks (last 10)
+        tasks = self._store.list_tasks()
+        if tasks:
+            lines = []
+            for t in tasks[:10]:
+                tid = t.get("task_id", "?")
+                status = t.get("status", "?")
+                title = t.get("title", "") or t.get("description", "")
+                title = title[:80]
+                updated = t.get("updated_at", "")
+                lines.append(f"- {tid} [{status}] {title} (updated {updated})")
+            sections.append("## Recent Tasks\n" + "\n".join(lines))
+
+        # Failure stats
+        stats = self._store.get_failure_stats()
+        if stats.get("total", 0) > 0:
+            lines = [f"Total failures: {stats['total']}"]
+            for cat, count in stats.get("by_category", {}).items():
+                lines.append(f"- {cat}: {count}")
+            sections.append("## Failure Summary\n" + "\n".join(lines))
+
+        # Unacknowledged routing suggestions
+        try:
+            suggestions = self._store.get_routing_suggestions(unacknowledged_only=True)
+            if suggestions:
+                lines = []
+                for s in suggestions[:5]:
+                    lines.append(f"- {s.get('suggestion', '')}")
+                sections.append("## Routing Suggestions\n" + "\n".join(lines))
+        except Exception:
+            pass
+
+        if not sections:
+            return "No task data available yet."
+        return "\n\n".join(sections)
+
+    async def _handle_chat(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle freeform text messages as conversational queries."""
+        if not await self._check_auth(update):
+            return
+
+        user_text = (update.message.text or "").strip()  # type: ignore[union-attr]
+        if not user_text:
+            return
+
+        chat_id = update.effective_chat.id  # type: ignore[union-attr]
+
+        if not self._llm_router:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "Chat mode unavailable — no LLM router configured."
+            )
+            return
+
+        # Gather grounding context
+        task_context = self._gather_task_context()
+
+        # Build message history
+        history = self._get_chat_history(chat_id)
+
+        system_prompt = (
+            "You are BOB, the agent-harness assistant available via Telegram. "
+            "Answer the user's questions about their project tasks, pipeline status, "
+            "failures, and ongoing work. Be concise — Telegram messages must stay under "
+            f"{self._MAX_MESSAGE_LEN} characters. Use plain text, not markdown. "
+            "If you don't have enough information to answer, say so.\n\n"
+            f"## Current Project Context\n{task_context}"
+        )
+
+        messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": user_text})
+
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._llm_router.call(
+                    "lightweight",
+                    messages,
+                    max_tokens=1000,
+                ),
+            )
+            reply = result.get("content", "Sorry, I couldn't generate a response.")
+        except Exception:
+            logger.exception("Chat LLM call failed")
+            reply = "Sorry, something went wrong processing your message."
+
+        # Truncate to Telegram limit
+        if len(reply) > self._MAX_MESSAGE_LEN:
+            reply = reply[: self._MAX_MESSAGE_LEN - 20] + "\n\n(truncated)"
+
+        # Update rolling history
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": reply})
+
+        await update.message.reply_text(reply)  # type: ignore[union-attr]
+
     async def _cmd_details(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -630,6 +760,7 @@ def main() -> None:
     except FileNotFoundError:
         logger.warning("harness.yaml not found; no chat ID restrictions")
 
+    from packages.llm.router import LLMRouter
     from packages.state.sqlite_store import SQLiteStore
     from packages.state.task_state import TaskStateManager
 
@@ -638,6 +769,7 @@ def main() -> None:
         project_paths = get_project_paths(project_name=project_name)
         store = SQLiteStore(str(project_paths.db_path))
         tsm = TaskStateManager(tasks_dir=str(project_paths.tasks_dir))
+        config_path = str(project_paths.repo_path / "config" / "model_routing.yaml") if project_paths.repo_path else "config/model_routing.yaml"
         logger.info(
             "Telegram bot bound to project=%s db=%s tasks_dir=%s",
             project_name,
@@ -648,10 +780,14 @@ def main() -> None:
         db_path = _resolve_legacy_sqlite_path(cfg)
         store = SQLiteStore(str(db_path))
         tsm = TaskStateManager()
+        config_path = "config/model_routing.yaml"
         logger.warning(
             "Telegram bot running in legacy/global mode. "
             "Set TELEGRAM_PROJECT or notifications.telegram.project to bind a registered project."
         )
+
+    llm_router = LLMRouter(config_path=config_path, sqlite_store=store)
+    logger.info("LLM router initialized for chat mode (config=%s)", config_path)
 
     bot = TelegramNotifier(
         token=token,
@@ -659,6 +795,7 @@ def main() -> None:
         task_state_manager=tsm,
         sqlite_store=store,
         project_name=project_name,
+        llm_router=llm_router,
     )
 
     logger.info("Starting Telegram bot...")
