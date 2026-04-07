@@ -315,6 +315,7 @@ if [[ ! -f "${HARNESS_DIR}/secrets/.env" ]]; then
 # LLM API Keys
 ANTHROPIC_API_KEY=sk-ant-xxxxx
 OPENAI_API_KEY=sk-xxxxx
+OPENROUTER_API_KEY=sk-or-xxxxx
 
 # Telegram Bot
 TELEGRAM_BOT_TOKEN=123456:ABC-xxxxx

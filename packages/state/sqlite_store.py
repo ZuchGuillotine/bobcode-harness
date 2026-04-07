@@ -97,6 +97,20 @@ class SQLiteStore:
                 success         INTEGER DEFAULT 1,
                 created_at      TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS routing_suggestions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                role            TEXT NOT NULL,
+                current_model   TEXT NOT NULL,
+                suggested_model TEXT,
+                failure_rate    REAL,
+                sample_size     INTEGER,
+                pattern         TEXT,
+                suggestion      TEXT NOT NULL,
+                confidence      REAL DEFAULT 0.0,
+                acknowledged    INTEGER DEFAULT 0,
+                created_at      TEXT NOT NULL
+            );
             """
         )
         self._conn.commit()
@@ -319,4 +333,60 @@ class SQLiteStore:
             "SELECT * FROM skill_usage WHERE task_id = ? ORDER BY created_at",
             (task_id,),
         ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Routing suggestions
+    # ------------------------------------------------------------------
+
+    def record_routing_suggestion(
+        self,
+        role: str,
+        current_model: str,
+        suggestion: str,
+        suggested_model: str | None = None,
+        failure_rate: float | None = None,
+        sample_size: int | None = None,
+        pattern: str | None = None,
+        confidence: float = 0.0,
+    ) -> int:
+        cur = self._conn.execute(
+            """
+            INSERT INTO routing_suggestions
+                (role, current_model, suggested_model, failure_rate,
+                 sample_size, pattern, suggestion, confidence, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                role, current_model, suggested_model, failure_rate,
+                sample_size, pattern, suggestion, confidence, _now_iso(),
+            ),
+        )
+        self._conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+
+    def get_routing_suggestions(self, unacknowledged_only: bool = True) -> list[dict[str, Any]]:
+        if unacknowledged_only:
+            rows = self._conn.execute(
+                "SELECT * FROM routing_suggestions WHERE acknowledged = 0 ORDER BY created_at DESC"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM routing_suggestions ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_failure_stats_by_model(self, since: datetime | None = None) -> list[dict[str, Any]]:
+        """Aggregate failures by model used."""
+        query = """
+            SELECT model_used, category, COUNT(*) as count
+              FROM failures
+             WHERE model_used IS NOT NULL
+        """
+        params: list[Any] = []
+        if since:
+            query += " AND created_at >= ?"
+            params.append(since.isoformat())
+        query += " GROUP BY model_used, category ORDER BY count DESC"
+        rows = self._conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]

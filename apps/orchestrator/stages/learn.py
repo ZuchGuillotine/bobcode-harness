@@ -54,6 +54,9 @@ def learn_node(state: dict[str, Any]) -> dict[str, Any]:
     # --- Update skill usage tracking ---
     _update_skill_tracking(record, project_paths)
 
+    # --- Analyze routing patterns and suggest adjustments ---
+    _analyze_routing_patterns(record, project_paths)
+
     logger.info(
         "Learn complete for %s: class=%s, skill=%s",
         task_id,
@@ -121,12 +124,14 @@ def _save_learning_record(task_id: str, record: dict[str, Any], project_paths: A
         store = SQLiteStore(str(project_paths.db_path))
         failure_class = record.get("failure_class", "unknown")
         if failure_class != "unknown" or record.get("final_status") not in ("done", "learned"):
+            # Determine which model was responsible
+            model_used = _infer_model_for_failure(failure_class, project_paths)
             store.record_failure(
                 task_id=task_id,
                 category=failure_class,
                 description=record.get("failure_description", ""),
                 skill_id=record.get("selected_skill"),
-                model_used=None,
+                model_used=model_used,
             )
         store.close()
     except Exception:
@@ -200,3 +205,112 @@ def _update_skill_tracking(record: dict[str, Any], project_paths: Any) -> None:
             json.dump(tracking, f, indent=2)
     except OSError:
         logger.warning("Failed to update skill tracking for %s", skill_id)
+
+
+# ---------------------------------------------------------------------------
+# Routing pattern analysis
+# ---------------------------------------------------------------------------
+
+# Thresholds for generating routing suggestions
+_MIN_SAMPLE_SIZE = 5          # Need at least N failures before suggesting
+_HIGH_FAILURE_RATE = 0.40     # 40%+ failure rate triggers a suggestion
+_CRITICAL_FAILURE_RATE = 0.60 # 60%+ triggers urgent suggestion
+
+_ROLE_MODEL_MAP = {
+    "execution_error": "worker",
+    "test_failure": "worker",
+    "review_rejected": "initial_reviewer",
+    "final_review_rejected": "final_reviewer",
+    "worker_fix_failed": "worker_fix",
+    "plan_quality": "planner",
+}
+
+
+def _infer_model_for_failure(failure_class: str, project_paths: Any) -> str | None:
+    """Infer which model was responsible for a given failure class."""
+    role = _ROLE_MODEL_MAP.get(failure_class)
+    if role:
+        return _get_current_model_for_role(role, project_paths)
+    return None
+
+
+def _analyze_routing_patterns(record: dict[str, Any], project_paths: Any) -> None:
+    """Analyze failure patterns and suggest routing adjustments.
+
+    Checks the last N failures to detect consistent model-specific issues
+    and records suggestions to the routing_suggestions table.
+    """
+    try:
+        store = SQLiteStore(str(project_paths.db_path))
+        stats = store.get_failure_stats()
+        total_failures = stats.get("total", 0)
+
+        if total_failures < _MIN_SAMPLE_SIZE:
+            store.close()
+            return
+
+        by_category = stats.get("by_category", {})
+
+        # Check each failure category for high rates
+        for category, count in by_category.items():
+            if count < _MIN_SAMPLE_SIZE:
+                continue
+
+            role = _ROLE_MODEL_MAP.get(category)
+            if not role:
+                continue
+
+            # Calculate failure rate for this category
+            # Query total tasks to get the rate
+            total_tasks = store._conn.execute(
+                "SELECT COUNT(*) FROM tasks"
+            ).fetchone()[0] or 1
+
+            failure_rate = count / total_tasks
+
+            if failure_rate >= _HIGH_FAILURE_RATE:
+                severity = "urgent" if failure_rate >= _CRITICAL_FAILURE_RATE else "advisory"
+                current_model = _get_current_model_for_role(role, project_paths)
+
+                suggestion_text = (
+                    f"[{severity.upper()}] Role '{role}' has {failure_rate:.0%} failure rate "
+                    f"({count}/{total_tasks} tasks) in category '{category}'. "
+                    f"Current model: {current_model}. "
+                    f"Consider switching to a more capable model or adjusting prompts."
+                )
+
+                # Check if we already have a recent suggestion for this role
+                existing = store._conn.execute(
+                    "SELECT id FROM routing_suggestions "
+                    "WHERE role = ? AND acknowledged = 0 AND pattern = ?",
+                    (role, category),
+                ).fetchone()
+
+                if not existing:
+                    store.record_routing_suggestion(
+                        role=role,
+                        current_model=current_model,
+                        suggestion=suggestion_text,
+                        failure_rate=failure_rate,
+                        sample_size=count,
+                        pattern=category,
+                        confidence=min(failure_rate * 1.5, 1.0),
+                    )
+                    logger.warning("ROUTING SUGGESTION: %s", suggestion_text)
+
+        store.close()
+    except Exception:
+        logger.debug("Failed to analyze routing patterns", exc_info=True)
+
+
+def _get_current_model_for_role(role: str, project_paths: Any) -> str:
+    """Read the current model for a role from the routing config."""
+    try:
+        import yaml
+        from pathlib import Path
+        config_path = Path(project_paths.repo_path) / "config" / "model_routing.yaml"
+        with open(config_path) as f:
+            config = yaml.safe_load(f) or {}
+        return config.get("routing", {}).get(role, {}).get("model", "unknown")
+    except Exception:
+        return "unknown"

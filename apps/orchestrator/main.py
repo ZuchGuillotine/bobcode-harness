@@ -12,7 +12,11 @@ from apps.orchestrator.stages.execute import execute_node
 from apps.orchestrator.stages.intake import intake_node
 from apps.orchestrator.stages.learn import learn_node
 from apps.orchestrator.stages.plan import plan_node
-from apps.orchestrator.stages.validate import validate_node
+from apps.orchestrator.stages.review_pipeline import (
+    final_review_node,
+    initial_review_node,
+    worker_fix_node,
+)
 from packages.config import get_project_paths
 
 logger = logging.getLogger(__name__)
@@ -78,7 +82,12 @@ def route_result(state: TaskState) -> str:
 # ---------------------------------------------------------------------------
 
 def build_graph() -> StateGraph:
-    """Construct and compile the orchestrator StateGraph."""
+    """Construct and compile the orchestrator StateGraph.
+
+    Pipeline:
+      intake → plan → execute → initial_review (GPT-5.4) → worker_fix (Qwen)
+            → final_review (Opus, read-only) → route_result → done | retry | learn
+    """
 
     graph = StateGraph(TaskState)
 
@@ -86,15 +95,19 @@ def build_graph() -> StateGraph:
     graph.add_node("intake", intake_node)
     graph.add_node("plan", plan_node)
     graph.add_node("execute", execute_node)
-    graph.add_node("validate", validate_node)
+    graph.add_node("initial_review", initial_review_node)
+    graph.add_node("worker_fix", worker_fix_node)
+    graph.add_node("final_review", final_review_node)
     graph.add_node("route_result", _route_result_node)
     graph.add_node("learn", learn_node)
 
-    # Linear edges
+    # Linear edges — multi-stage review pipeline
     graph.add_edge("intake", "plan")
     graph.add_edge("plan", "execute")
-    graph.add_edge("execute", "validate")
-    graph.add_edge("validate", "route_result")
+    graph.add_edge("execute", "initial_review")
+    graph.add_edge("initial_review", "worker_fix")
+    graph.add_edge("worker_fix", "final_review")
+    graph.add_edge("final_review", "route_result")
 
     # Conditional edges from route_result
     graph.add_conditional_edges(
@@ -109,8 +122,6 @@ def build_graph() -> StateGraph:
 
     # Learn always terminates
     graph.add_edge("learn", END)
-
-    # Retry goes back to plan (handled by conditional edge above)
 
     # Entry point
     graph.set_entry_point("intake")

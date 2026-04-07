@@ -59,6 +59,10 @@ def _auto_register() -> None:
         from packages.llm.providers import google_provider  # noqa: F401
     except ImportError:
         pass
+    try:
+        from packages.llm.providers import openrouter_provider  # noqa: F401
+    except ImportError:
+        pass
 
 
 _auto_register()

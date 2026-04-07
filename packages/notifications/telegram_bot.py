@@ -345,6 +345,13 @@ class TelegramNotifier:
             if status == "done":
                 summary = self._build_summary(result)
                 msg = format_task_lifecycle_complete(task_id, summary)
+            elif status == "retry":
+                attempt = result.get("attempt", "?")
+                msg = (
+                    f"*{escape_markdown(task_id)}* needs another pass\n"
+                    f"*Attempt:* {escape_markdown(str(attempt))}\n"
+                    f"Re-entering pipeline\u2026"
+                )
             elif status in ("failed", "learned"):
                 error = result.get("error") or f"Ended with status: {status}"
                 msg = format_task_lifecycle_failed(task_id, error)
