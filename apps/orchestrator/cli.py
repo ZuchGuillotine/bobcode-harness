@@ -12,6 +12,7 @@ import subprocess
 import sys
 import uuid
 from datetime import UTC, datetime
+from difflib import unified_diff
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,12 @@ from packages.config import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_AGENT_DOC_FILES = {
+    "agents": "AGENTS.md",
+    "claude": "CLAUDE.md",
+}
+_DEFAULT_SHARED_DOC_REGION = "BOBCODE"
 
 def _iter_task_roots(project_name: str | None = None) -> list[tuple[str | None, Path]]:
     """Return the task roots to search for task state."""
@@ -204,6 +211,47 @@ def _task_status_payload(
     return payload
 
 
+def _shared_doc_markers(region: str) -> tuple[str, str]:
+    """Return begin/end markers for a shared agent-doc region."""
+    return f"<!-- BEGIN SHARED:{region} -->", f"<!-- END SHARED:{region} -->"
+
+
+def _find_shared_doc_region(lines: list[str], region: str) -> tuple[int, int]:
+    """Find a shared doc region by markers that stand alone on their lines."""
+    begin_marker, end_marker = _shared_doc_markers(region)
+    begin_index: int | None = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == begin_marker:
+            if begin_index is not None:
+                raise ValueError(f"duplicate begin marker for region {region}")
+            begin_index = index
+        elif stripped == end_marker:
+            if begin_index is None:
+                raise ValueError(f"end marker before begin marker for region {region}")
+            return begin_index, index
+    if begin_index is None:
+        raise ValueError(f"missing begin marker for region {region}")
+    raise ValueError(f"missing end marker for region {region}")
+
+
+def _extract_shared_doc_block(text: str, region: str) -> str:
+    """Extract a shared region body without marker lines."""
+    lines = text.splitlines(keepends=True)
+    begin_index, end_index = _find_shared_doc_region(lines, region)
+    return "".join(lines[begin_index + 1:end_index])
+
+
+def _replace_shared_doc_block(text: str, region: str, block: str) -> str:
+    """Replace a shared region body while preserving the marker lines."""
+    lines = text.splitlines(keepends=True)
+    begin_index, end_index = _find_shared_doc_region(lines, region)
+    replacement = block.splitlines(keepends=True)
+    if block and not block.endswith("\n"):
+        replacement[-1] = f"{replacement[-1]}\n"
+    return "".join(lines[:begin_index + 1] + replacement + lines[end_index:])
+
+
 def _load_harness_yaml() -> tuple[Path, dict[str, Any]]:
     """Load ``config/harness.yaml`` if present."""
     import yaml
@@ -253,15 +301,14 @@ def _ensure_codegraph_ignore(repo_path: Path, mode: str) -> tuple[Path, list[str
     return ignore_path, added
 
 
-def _build_agents_md(project_name: str, repo_context: dict[str, str]) -> str:
-    """Return the default AGENTS.md template for assisted mode."""
-    return f"""# AGENTS.md
-
-## Project: {project_name}
-## Language: {repo_context["language"]}
-## Build: {repo_context["build_cmd"]}
-## Test: {repo_context["test_cmd"]}
-## Lint: {repo_context["lint_cmd"]}
+def _build_agent_shared_doc_block(project_name: str, repo_context: dict[str, str]) -> str:
+    """Return shared BOBCODE instructions used across agent markdown files."""
+    return f"""## Project
+- Name: {project_name}
+- Language: {repo_context["language"]}
+- Build: `{repo_context["build_cmd"]}`
+- Test: `{repo_context["test_cmd"]}`
+- Lint: `{repo_context["lint_cmd"]}`
 
 ## Architecture
 <!-- Describe your project structure here -->
@@ -282,26 +329,101 @@ Use BOBCODE when the operator asks you to work through the harness or when a tas
 needs durable state across agent sessions.
 
 Startup sequence:
-1. `harness-ctl doctor --json` — verify local readiness.
-2. `harness-ctl cg status --json` — inspect codegraph and embedding state.
-3. `harness-ctl task new --agent-driven <slug> "<task description>" --json` —
+1. `harness-ctl doctor --json` - verify local readiness.
+2. `harness-ctl docs sync --check` - verify shared agent docs have not drifted.
+3. `harness-ctl cg status --json` - inspect codegraph and embedding state.
+4. `harness-ctl task new --agent-driven <slug> "<task description>" --json` -
    create a task scaffold and isolated worktree without invoking another LLM.
-4. Read the returned `state_path`, `plan_path`, and `worktree_path`.
-5. Keep `.bobcode/tasks/<TASK-ID>/progress.jsonl` current with short JSONL progress events.
-6. Before finishing, run the repo test/lint commands and update `state.json`
+5. Read the returned `state_path`, `plan_path`, and `worktree_path`.
+6. Keep `.bobcode/tasks/<TASK-ID>/progress.jsonl` current with short JSONL
+   progress events.
+7. Before finishing, run the repo test/lint commands and update `state.json`
    with status, summary, and verification.
 
-Prefer the generic `--agent-driven` flag. `--claude-driven` is accepted as a compatibility alias.
+Prefer the generic `--agent-driven` flag. `--claude-driven` is accepted as a
+compatibility alias.
 
 ## codegraph
 Graph at `.codegraph/graph.db`. Rebuild it after structural changes.
 Before modifying code, use harness-wrapped codegraph commands so output is stable:
-1. `harness-ctl cg where <symbol> --json` — find where it lives
-2. `harness-ctl cg context <symbol> --json` — check who calls it
-3. `harness-ctl cg impact <symbol-or-file> --json` — check blast radius
-4. `harness-ctl cg search "<natural language query>" --json` — semantic
+1. `harness-ctl cg where <symbol> --json` - find where it lives
+2. `harness-ctl cg context <symbol> --json` - check who calls it
+3. `harness-ctl cg impact <symbol-or-file> --json` - check blast radius
+4. `harness-ctl cg search "<natural language query>" --json` - semantic
    search; if embeddings are missing, run `harness-ctl cg embed`
 """
+
+
+def _build_agent_doc(
+    doc_kind: str,
+    project_name: str,
+    repo_context: dict[str, str],
+    region: str = _DEFAULT_SHARED_DOC_REGION,
+) -> str:
+    """Return a default agent markdown file with a shared BOBCODE block."""
+    begin_marker, end_marker = _shared_doc_markers(region)
+    shared_block = _build_agent_shared_doc_block(project_name, repo_context)
+    if doc_kind == "claude":
+        title = "# CLAUDE.md"
+        preamble = """Claude-specific notes live outside the shared BOBCODE block.
+At session start, run `harness-ctl docs sync --check`; if it reports drift,
+inspect `harness-ctl docs sync --diff` before editing shared instructions.
+"""
+        scratch = """## Claude Overrides
+<!-- Claude-specific style or workflow preferences can live here. -->
+"""
+    else:
+        title = "# AGENTS.md"
+        preamble = """Agent-neutral instructions for this repository.
+Shared BOBCODE guidance lives between the markers below. Agent-specific notes
+should live outside the markers so they do not propagate to other agents.
+"""
+        scratch = """## Agent-Specific Overrides
+<!-- Add per-agent notes here, for example: ### cursor, ### gemini, ### codex. -->
+"""
+
+    return (
+        f"{title}\n\n"
+        f"{preamble}\n"
+        f"{begin_marker}\n"
+        f"{shared_block}"
+        f"{end_marker}\n\n"
+        f"{scratch}"
+    )
+
+
+def _build_agents_md(project_name: str, repo_context: dict[str, str]) -> str:
+    """Return the default AGENTS.md template for assisted mode."""
+    return _build_agent_doc("agents", project_name, repo_context)
+
+
+def _build_claude_md(project_name: str, repo_context: dict[str, str]) -> str:
+    """Return the default CLAUDE.md template for assisted mode."""
+    return _build_agent_doc("claude", project_name, repo_context)
+
+
+def _write_agent_instruction_docs(
+    repo_root: Path,
+    project_name: str,
+    repo_context: dict[str, str],
+    force: bool = False,
+) -> list[dict[str, Any]]:
+    """Create default agent instruction docs, preserving existing files."""
+    docs = {
+        "agents": _build_agents_md(project_name, repo_context),
+        "claude": _build_claude_md(project_name, repo_context),
+    }
+    results: list[dict[str, Any]] = []
+    for key, content in docs.items():
+        path = repo_root / _AGENT_DOC_FILES[key]
+        existed = path.exists()
+        if force or not existed:
+            path.write_text(content, encoding="utf-8")
+            action = "updated" if existed else "created"
+        else:
+            action = "kept"
+        results.append({"key": key, "path": str(path), "action": action})
+    return results
 
 
 def _is_git_repo(path: Path) -> bool:
@@ -672,13 +794,14 @@ def cmd_init(args: argparse.Namespace) -> None:
     progress_path = project_paths.project_dir / "progress.jsonl"
     progress_path.touch(exist_ok=True)
 
+    agent_doc_results: list[dict[str, Any]] = []
     if args.assisted:
-        agents_md_path = repo_root / "AGENTS.md"
-        if args.force or not agents_md_path.exists():
-            agents_md_path.write_text(
-                _build_agents_md(project_name, repo_context),
-                encoding="utf-8",
-            )
+        agent_doc_results = _write_agent_instruction_docs(
+            repo_root,
+            project_name,
+            repo_context,
+            force=args.force,
+        )
 
     print(f"Initialised BOBCODE for: {project_name}")
     print(f"  Repo: {repo_root}")
@@ -688,6 +811,11 @@ def cmd_init(args: argparse.Namespace) -> None:
         print(f"  Updated {ignore_path}: added {', '.join(added_entries)}")
     if shared_ignore_path and shared_added_entries:
         print(f"  Updated {shared_ignore_path}: added {', '.join(shared_added_entries)}")
+    for result in agent_doc_results:
+        if result["action"] == "kept":
+            print(f"  Found existing: {result['path']}")
+        else:
+            print(f"  {result['action'].capitalize()}: {result['path']}")
     print(f"  Codegraph: {codegraph_status} — {codegraph_message}")
     if codegraph_status == "ready":
         print(
@@ -1290,6 +1418,188 @@ def cmd_task(args: argparse.Namespace) -> None:
     print(f"  Branch: {payload['branch']}")
 
 
+def _load_agent_doc_blocks(repo_root: Path, region: str) -> dict[str, dict[str, Any]]:
+    """Load shared blocks from existing agent docs."""
+    docs: dict[str, dict[str, Any]] = {}
+    for key, filename in _AGENT_DOC_FILES.items():
+        path = repo_root / filename
+        if not path.exists():
+            docs[key] = {"key": key, "path": path, "exists": False}
+            continue
+        text = path.read_text(encoding="utf-8")
+        try:
+            block = _extract_shared_doc_block(text, region)
+        except ValueError as exc:
+            docs[key] = {
+                "key": key,
+                "path": path,
+                "exists": True,
+                "error": str(exc),
+            }
+            continue
+        docs[key] = {
+            "key": key,
+            "path": path,
+            "exists": True,
+            "text": text,
+            "block": block,
+        }
+    return docs
+
+
+def _choose_agent_doc_source(
+    docs: dict[str, dict[str, Any]],
+    requested: str | None = None,
+) -> dict[str, Any]:
+    """Choose the canonical source doc for comparison or sync."""
+    if requested:
+        candidate = docs.get(requested)
+        if not candidate or not candidate.get("exists"):
+            raise ValueError(f"source document not found: {_AGENT_DOC_FILES[requested]}")
+        if candidate.get("error"):
+            raise ValueError(f"source document has invalid markers: {candidate['error']}")
+        return candidate
+
+    for key in ("agents", "claude"):
+        candidate = docs.get(key)
+        if candidate and candidate.get("exists") and not candidate.get("error"):
+            return candidate
+    raise ValueError("no marked agent docs found")
+
+
+def _agent_doc_drift_report(
+    docs: dict[str, dict[str, Any]],
+    source: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Compare marked shared blocks against the chosen source."""
+    drift: list[dict[str, Any]] = []
+    source_block = source["block"]
+    for key, doc in docs.items():
+        if key == source["key"] or not doc.get("exists"):
+            continue
+        if doc.get("error"):
+            drift.append({
+                "key": key,
+                "path": str(doc["path"]),
+                "status": "invalid",
+                "error": doc["error"],
+            })
+            continue
+        if doc.get("block") != source_block:
+            diff = "".join(unified_diff(
+                str(doc["block"]).splitlines(keepends=True),
+                str(source_block).splitlines(keepends=True),
+                fromfile=str(doc["path"]),
+                tofile=str(source["path"]),
+            ))
+            drift.append({
+                "key": key,
+                "path": str(doc["path"]),
+                "status": "drift",
+                "diff": diff,
+            })
+    return drift
+
+
+def _sync_agent_docs(
+    repo_root: Path,
+    region: str,
+    source_key: str | None = None,
+    write: bool = False,
+) -> dict[str, Any]:
+    """Check or sync shared blocks across known agent docs."""
+    docs = _load_agent_doc_blocks(repo_root, region)
+    source = _choose_agent_doc_source(docs, source_key)
+    drift = _agent_doc_drift_report(docs, source)
+    updated: list[dict[str, str]] = []
+
+    if write:
+        source_block = source["block"]
+        for key, doc in docs.items():
+            if key == source["key"] or not doc.get("exists") or doc.get("error"):
+                continue
+            if doc.get("block") == source_block:
+                continue
+            new_text = _replace_shared_doc_block(str(doc["text"]), region, source_block)
+            Path(doc["path"]).write_text(new_text, encoding="utf-8")
+            updated.append({"key": key, "path": str(doc["path"])})
+        docs = _load_agent_doc_blocks(repo_root, region)
+        drift = _agent_doc_drift_report(docs, source)
+
+    return {
+        "ok": not drift,
+        "repo_path": str(repo_root),
+        "region": region,
+        "source": source["key"],
+        "source_path": str(source["path"]),
+        "checked": [
+            {
+                "key": key,
+                "path": str(doc["path"]),
+                "exists": bool(doc.get("exists")),
+                "has_region": bool(doc.get("block") is not None),
+                "error": doc.get("error"),
+            }
+            for key, doc in docs.items()
+        ],
+        "drift": drift,
+        "updated": updated,
+    }
+
+
+def cmd_docs(args: argparse.Namespace) -> None:
+    """Agent documentation maintenance commands."""
+    if args.docs_command != "sync":
+        _print_json({"ok": False, "error": "Unknown docs command"})
+        sys.exit(1)
+
+    repo_root = _current_git_repo(args.path)
+    if repo_root is None:
+        _print_json({
+            "ok": False,
+            "error": f"Not a git repository: {args.path}",
+            "remediation": ["Run from a git repo or pass --path"],
+        })
+        sys.exit(1)
+
+    try:
+        payload = _sync_agent_docs(
+            repo_root=repo_root,
+            region=args.region,
+            source_key=args.source or None,
+            write=bool(args.source and not args.check and not args.diff),
+        )
+    except ValueError as exc:
+        payload = {"ok": False, "repo_path": str(repo_root), "error": str(exc)}
+        if args.json:
+            _print_json(payload)
+        else:
+            print(f"Agent docs sync failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.json:
+        _print_json(payload)
+    elif args.diff:
+        if not payload["drift"]:
+            print("Agent docs are in sync.")
+        for item in payload["drift"]:
+            if item.get("diff"):
+                print(item["diff"], end="" if item["diff"].endswith("\n") else "\n")
+            else:
+                print(f"{item['path']}: {item.get('error', item['status'])}")
+    elif args.source and not args.check:
+        if payload["updated"]:
+            for item in payload["updated"]:
+                print(f"Updated {item['path']} from {payload['source_path']}")
+        else:
+            print("Agent docs are already in sync.")
+    else:
+        print("Agent docs are in sync." if payload["ok"] else "Agent docs drift detected.")
+
+    if not payload["ok"]:
+        sys.exit(1)
+
+
 def cmd_register(args: argparse.Namespace) -> None:
     """Register a project for harness management."""
     from datetime import datetime
@@ -1358,16 +1668,15 @@ def cmd_register(args: argparse.Namespace) -> None:
         target_name = ".gitignore" if mode == "assisted" else ".git/info/exclude"
         print(f"  Found existing ignore entry in {target_name}")
 
-    # 4. Create AGENTS.md if it doesn't exist
-    agents_md_path = os.path.join(repo_path, "AGENTS.md")
-    if mode == "assisted" and not os.path.exists(agents_md_path):
-        with open(agents_md_path, "w") as f:
-            f.write(_build_agents_md(project_name, repo_context))
-        print(f"  Created: {agents_md_path}")
-    elif mode == "assisted":
-        print(f"  Found existing: {agents_md_path}")
+    # 4. Create agent instruction docs if they don't exist
+    if mode == "assisted":
+        for result in _write_agent_instruction_docs(repo_path_obj, project_name, repo_context):
+            if result["action"] == "kept":
+                print(f"  Found existing: {result['path']}")
+            else:
+                print(f"  {result['action'].capitalize()}: {result['path']}")
     else:
-        print("  External mode: leaving AGENTS.md untouched")
+        print("  External mode: leaving agent instruction docs untouched")
 
     # 5. Create per-project config
     config_dir = get_config_dir()
@@ -1553,13 +1862,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument(
         "--assisted",
         action="store_true",
-        help="Also create/update AGENTS.md with detected build/test/lint commands",
+        help="Also create/update AGENTS.md and CLAUDE.md agent instruction files",
     )
     p_init.add_argument(
         "--agent-instructions",
         action="store_true",
         dest="assisted",
-        help="Alias for --assisted; create/update AGENTS.md for direct agent use",
+        help="Alias for --assisted; create/update direct-agent instruction files",
     )
     p_init.add_argument(
         "--gitignore",
@@ -1703,6 +2012,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_task_new.add_argument("--json", action="store_true", help="Emit JSON instead of text")
 
+    # docs
+    p_docs = subparsers.add_parser("docs", help="Maintain agent instruction docs")
+    docs_subparsers = p_docs.add_subparsers(dest="docs_command", help="Docs commands")
+    p_docs_sync = docs_subparsers.add_parser(
+        "sync",
+        help="Check or sync shared blocks across AGENTS.md and CLAUDE.md",
+    )
+    p_docs_sync.add_argument("--path", default=".", help="Repository path")
+    p_docs_sync.add_argument(
+        "--check",
+        action="store_true",
+        help="Exit non-zero when shared blocks drift",
+    )
+    p_docs_sync.add_argument(
+        "--diff",
+        action="store_true",
+        help="Show shared-block diff against the selected source",
+    )
+    p_docs_sync.add_argument(
+        "--from",
+        dest="source",
+        choices=sorted(_AGENT_DOC_FILES),
+        default="",
+        help="Propagate this source document to other existing marked docs",
+    )
+    p_docs_sync.add_argument(
+        "--region",
+        default=_DEFAULT_SHARED_DOC_REGION,
+        help="Shared region name (default: BOBCODE)",
+    )
+    p_docs_sync.add_argument("--json", action="store_true", help="Emit JSON instead of text")
+
     # approve
     p_approve = subparsers.add_parser("approve", help="Approve a task")
     p_approve.add_argument("task_id", help="Task ID to approve")
@@ -1819,6 +2160,7 @@ def main() -> None:
         "inbox": cmd_inbox,
         "cg": cmd_cg,
         "task": cmd_task,
+        "docs": cmd_docs,
         "approve": cmd_approve,
         "reject": cmd_reject,
         "register": cmd_register,

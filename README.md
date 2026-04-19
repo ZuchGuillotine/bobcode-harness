@@ -66,6 +66,10 @@ repo-visible instructions:
 harness-ctl init . --agent-instructions
 ```
 
+This creates both `AGENTS.md` and `CLAUDE.md`. Shared BOBCODE instructions live
+between matching `<!-- BEGIN SHARED:BOBCODE -->` / `<!-- END SHARED:BOBCODE -->`
+markers; agent-specific notes stay outside those markers.
+
 Use `--gitignore` when the team wants `.bobcode/` and `.codegraph/` ignored
 through tracked repo config instead of only local `.git/info/exclude`.
 
@@ -106,7 +110,8 @@ your-repo/
 │   ├── worktrees/            # isolated task worktrees
 │   └── browser/              # browser daemon state and evidence
 ├── .codegraph/graph.db       # local code graph, ignored by default
-└── AGENTS.md                 # optional, only with --agent-instructions
+├── AGENTS.md                 # optional, agent-neutral instructions
+└── CLAUDE.md                 # optional, Claude-specific wrapper
 ```
 
 ## Core Commands
@@ -120,6 +125,8 @@ your-repo/
 | `harness-ctl inbox [--json]` | Show tasks that need operator attention |
 | `harness-ctl status [TASK-ID] [--json]` | Inspect task state and validation results |
 | `harness-ctl cg status/build/embed/where/context/impact/search` | Stable codegraph wrapper for agents |
+| `harness-ctl docs sync --check` | Detect shared instruction drift across agent docs |
+| `harness-ctl docs sync --from agents` | Propagate the shared block from `AGENTS.md` |
 | `harness-ctl approve TASK-ID` | Record local approval |
 | `harness-ctl reject TASK-ID --reason "..."` | Record local rejection |
 | `harness-ctl register /repo` | Optional global multi-project registration |
@@ -169,6 +176,19 @@ missing embeddings, run:
 ```bash
 harness-ctl cg embed
 ```
+
+## Agent Docs Sync
+
+Different agents prefer different instruction files. BOBCODE keeps the shared
+instructions synchronized while allowing agent-specific notes:
+
+- `AGENTS.md` is the agent-neutral entry point.
+- `CLAUDE.md` can hold Claude-specific session notes outside the shared block.
+- Shared instructions live only between standalone marker lines.
+- `harness-ctl docs sync --check` exits non-zero if the shared block drifts.
+- `harness-ctl docs sync --diff` shows the shared-block diff.
+- `harness-ctl docs sync --from agents` or `--from claude` propagates one source
+  block to other existing marked files.
 
 ## Browser Feedback
 

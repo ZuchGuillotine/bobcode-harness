@@ -42,7 +42,8 @@ target-repo/
 `harness-ctl init --gitignore` also adds them to tracked `.gitignore` when a team
 wants shared hygiene. `--agent-instructions` may create tracked `AGENTS.md` when
 the operator wants repo-visible instructions for Claude, Codex, Gemini, or any
-other active coding agent.
+other active coding agent. That mode creates both `AGENTS.md` and `CLAUDE.md`
+with a byte-identical shared BOBCODE block between standalone markers.
 
 ## CLI
 
@@ -55,6 +56,8 @@ other active coding agent.
 | `harness-ctl inbox [--json]` | Show tasks needing operator attention |
 | `harness-ctl status [TASK-ID] [--json]` | Inspect one task or all tasks |
 | `harness-ctl cg ...` | Stable codegraph wrapper with JSON and remediation hints |
+| `harness-ctl docs sync --check` | Check shared agent docs for drift |
+| `harness-ctl docs sync --from agents` | Propagate one shared block to other agent docs |
 | `harness-ctl approve/reject` | Record a human decision |
 
 ## Direct Agent Mode
@@ -79,6 +82,29 @@ JSON surfaces:
 - `harness-ctl inbox --json`
 - `harness-ctl task new --agent-driven ... --json`
 - `harness-ctl cg <subcommand> --json`
+- `harness-ctl docs sync --check --json`
+
+## Agent Doc Routing
+
+Agent-specific instruction files are useful, but shared harness instructions must
+not drift. BOBCODE uses a marked shared-region protocol:
+
+```markdown
+<!-- BEGIN SHARED:BOBCODE -->
+shared instructions
+<!-- END SHARED:BOBCODE -->
+```
+
+Rules:
+
+- `AGENTS.md` is the agent-neutral source humans and most agents can read.
+- `CLAUDE.md` may contain Claude-specific preamble or style notes outside the
+  shared markers.
+- Only marker lines that stand alone are parsed; prose mentions of marker text
+  are ignored.
+- Sync is explicit: `harness-ctl docs sync --from agents` or
+  `harness-ctl docs sync --from claude`.
+- CI or agent session start can run `harness-ctl docs sync --check`.
 
 ## Agent Loop
 

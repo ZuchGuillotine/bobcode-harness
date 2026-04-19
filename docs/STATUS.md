@@ -34,7 +34,7 @@ The removed/default-off pieces are:
   - creates `progress.jsonl`
   - adds `.bobcode/` and `.codegraph/` to `.git/info/exclude`
   - optionally adds `.bobcode/` and `.codegraph/` to `.gitignore` with `--gitignore`
-  - optionally creates agent-facing `AGENTS.md` with `--agent-instructions`
+  - optionally creates agent-facing `AGENTS.md` and `CLAUDE.md` with `--agent-instructions`
   - builds codegraph unless `--skip-codegraph` is passed
 
 - [x] `harness-ctl doctor [path]`
@@ -64,6 +64,12 @@ The removed/default-off pieces are:
   - creates an isolated worktree by default
   - supports `--no-worktree` and `--claude-driven` compatibility mode
   - does not invoke the LLM orchestrator
+
+- [x] `harness-ctl docs sync`
+  - checks shared BOBCODE blocks across `AGENTS.md` and `CLAUDE.md`
+  - supports `--check`, `--diff`, `--from agents`, `--from claude`, and `--json`
+  - only parses markers that stand alone on their lines
+  - keeps agent-specific instructions outside shared markers
 
 - [x] Direct repo task submission
   - `harness-ctl submit "task"` now defaults to the current git repo
