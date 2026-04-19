@@ -38,7 +38,11 @@ target-repo/
   .codegraph/graph.db
 ```
 
-`.bobcode/` and `.codegraph/` are ignored through `.git/info/exclude` by default. Assisted mode may create tracked `AGENTS.md` when the operator wants repo-visible instructions.
+`.bobcode/` and `.codegraph/` are ignored through `.git/info/exclude` by default.
+`harness-ctl init --gitignore` also adds them to tracked `.gitignore` when a team
+wants shared hygiene. `--agent-instructions` may create tracked `AGENTS.md` when
+the operator wants repo-visible instructions for Claude, Codex, Gemini, or any
+other active coding agent.
 
 ## CLI
 
@@ -47,9 +51,34 @@ target-repo/
 | `harness-ctl init [path]` | Create local runtime files and build codegraph |
 | `harness-ctl doctor [path]` | Verify repo readiness |
 | `harness-ctl submit "task"` | Run a task in the current repo |
-| `harness-ctl inbox` | Show tasks needing operator attention |
-| `harness-ctl status TASK-ID` | Inspect a task |
+| `harness-ctl task new --agent-driven <slug> "task"` | Scaffold a task for the active external agent without invoking the LLM pipeline |
+| `harness-ctl inbox [--json]` | Show tasks needing operator attention |
+| `harness-ctl status [TASK-ID] [--json]` | Inspect one task or all tasks |
+| `harness-ctl cg ...` | Stable codegraph wrapper with JSON and remediation hints |
 | `harness-ctl approve/reject` | Record a human decision |
+
+## Direct Agent Mode
+
+BOBCODE should support two task paths:
+
+1. **Harness-orchestrated:** `harness-ctl submit "task"` runs intake, planning,
+   execution, review, and learning through BOBCODE.
+2. **External-agent orchestrated:** `harness-ctl task new --agent-driven ...`
+   creates the durable task state, plan skeleton, progress log, branch, and
+   worktree that the currently active agent can use directly.
+
+The external-agent path is intentionally generic. Claude-specific ergonomics are
+allowed as aliases (`--claude-driven`), but the stable contract should not bind
+BOBCODE to any one agent runtime.
+
+All agent-facing commands should offer machine-readable output. Current required
+JSON surfaces:
+
+- `harness-ctl doctor --json`
+- `harness-ctl status --json`
+- `harness-ctl inbox --json`
+- `harness-ctl task new --agent-driven ... --json`
+- `harness-ctl cg <subcommand> --json`
 
 ## Agent Loop
 

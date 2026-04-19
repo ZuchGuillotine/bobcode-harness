@@ -59,6 +59,16 @@ harness-ctl init .
 harness-ctl doctor
 ```
 
+If an interactive coding agent will directly use the harness, ask it to install
+repo-visible instructions:
+
+```bash
+harness-ctl init . --agent-instructions
+```
+
+Use `--gitignore` when the team wants `.bobcode/` and `.codegraph/` ignored
+through tracked repo config instead of only local `.git/info/exclude`.
+
 Submit a task:
 
 ```bash
@@ -66,6 +76,19 @@ harness-ctl submit "refactor the auth module to use JWT tokens"
 harness-ctl inbox
 harness-ctl status TASK-001
 ```
+
+Or let the active agent orchestrate the task itself without invoking BOBCODE's
+LLM pipeline:
+
+```bash
+harness-ctl task new --agent-driven auth-refactor "refactor auth token handling" --json
+```
+
+That creates `.bobcode/tasks/<TASK-ID>/manifest.json`, `state.json`,
+`plan.json`, `progress.jsonl`, and an isolated worktree by default. Agents can
+use `--no-worktree` when the operator explicitly wants work in the current
+checkout. `--claude-driven` is accepted as an alias for Claude sessions, but the
+portable flag is `--agent-driven`.
 
 ## Repo-Local State
 
@@ -83,7 +106,7 @@ your-repo/
 │   ├── worktrees/            # isolated task worktrees
 │   └── browser/              # browser daemon state and evidence
 ├── .codegraph/graph.db       # local code graph, ignored by default
-└── AGENTS.md                 # optional, only with --assisted
+└── AGENTS.md                 # optional, only with --agent-instructions
 ```
 
 ## Core Commands
@@ -93,8 +116,10 @@ your-repo/
 | `harness-ctl init [path]` | Initialize repo-local BOBCODE state |
 | `harness-ctl doctor [path]` | Check git, `.bobcode`, codegraph, provider keys, and browser daemon files |
 | `harness-ctl submit "task"` | Run the task through the local orchestrator |
-| `harness-ctl inbox` | Show tasks that need operator attention |
-| `harness-ctl status [TASK-ID]` | Inspect task state and validation results |
+| `harness-ctl task new --agent-driven <slug> "task"` | Scaffold a task for the active external agent |
+| `harness-ctl inbox [--json]` | Show tasks that need operator attention |
+| `harness-ctl status [TASK-ID] [--json]` | Inspect task state and validation results |
+| `harness-ctl cg status/build/embed/where/context/impact/search` | Stable codegraph wrapper for agents |
 | `harness-ctl approve TASK-ID` | Record local approval |
 | `harness-ctl reject TASK-ID --reason "..."` | Record local rejection |
 | `harness-ctl register /repo` | Optional global multi-project registration |
@@ -125,6 +150,25 @@ BOBCODE uses local codegraph queries as the main low-token retrieval primitive:
 - complexity and dependency checks
 
 Codegraph is part of the normal path. `--skip-codegraph` exists only for degraded local setup.
+
+Use `harness-ctl cg ...` instead of calling `codegraph` directly when an agent
+needs stable JSON and remediation hints:
+
+```bash
+harness-ctl cg status --json
+harness-ctl cg where MySymbol --json
+harness-ctl cg context MySymbol --json
+harness-ctl cg impact src/auth.py --json
+harness-ctl cg search "where login tokens are validated" --json
+```
+
+Semantic search requires embeddings. BOBCODE does not build them during init by
+default because it can be slower than graph construction; if search reports
+missing embeddings, run:
+
+```bash
+harness-ctl cg embed
+```
 
 ## Browser Feedback
 

@@ -33,6 +33,8 @@ The removed/default-off pieces are:
   - creates `feature_list.json`
   - creates `progress.jsonl`
   - adds `.bobcode/` and `.codegraph/` to `.git/info/exclude`
+  - optionally adds `.bobcode/` and `.codegraph/` to `.gitignore` with `--gitignore`
+  - optionally creates agent-facing `AGENTS.md` with `--agent-instructions`
   - builds codegraph unless `--skip-codegraph` is passed
 
 - [x] `harness-ctl doctor [path]`
@@ -46,6 +48,22 @@ The removed/default-off pieces are:
 - [x] `harness-ctl inbox`
   - shows tasks that are not terminal
   - includes current repo-local tasks by default
+  - supports `--json`
+
+- [x] `harness-ctl status --json`
+  - emits stable JSON for one task or all visible tasks
+  - includes task paths, state path, plan path, progress path, and eval results
+
+- [x] `harness-ctl cg`
+  - wraps codegraph `status`, `build`, `embed`, `where`, `context`, `impact`, `search`, `stats`, `deps`, `dataflow`, and `complexity`
+  - emits stable JSON for agent parsing
+  - returns remediation hints when graph or embeddings are missing
+
+- [x] `harness-ctl task new --agent-driven`
+  - creates task manifest, `state.json`, `plan.json`, `budget.json`, and progress logs
+  - creates an isolated worktree by default
+  - supports `--no-worktree` and `--claude-driven` compatibility mode
+  - does not invoke the LLM orchestrator
 
 - [x] Direct repo task submission
   - `harness-ctl submit "task"` now defaults to the current git repo
@@ -67,12 +85,12 @@ The removed/default-off pieces are:
 - [ ] Add line-bounded edit tool with immediate lint/syntax feedback.
 - [ ] Add capped repo search tool with narrowing guidance.
 - [ ] Normalize agent tool responses to `status`, `summary`, `artifacts`, and `next_actions`.
-- [ ] Append progress events to `.bobcode/progress.jsonl` at task boundaries.
+- [ ] Append progress events to `.bobcode/progress.jsonl` at every orchestrated task boundary.
 - [ ] Update `feature_list.json` from verified task completions.
 - [ ] Hide ephemeral task branches behind a single integration branch.
 - [ ] Auto-rebuild codegraph after structural edits or retrieval failure clusters.
 - [ ] Add `harness-ctl learn report`.
-- [ ] Add focused tests for `init`, `doctor`, and `inbox`.
+- [ ] Add focused tests for `init`, `doctor`, `cg`, and `inbox`.
 
 ## Known Issues
 
