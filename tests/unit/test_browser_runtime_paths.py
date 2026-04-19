@@ -27,7 +27,7 @@ def test_project_paths_include_browser_runtime_dirs(
     paths = get_project_paths(repo_path=str(repo_path))
     paths.ensure_dirs()
 
-    assert paths.browser_dir == harness_root / "data" / "projects" / "demo-repo" / "browser"
+    assert paths.browser_dir == repo_path / ".bobcode" / "browser"
     assert paths.browser_state_file == paths.browser_dir / "daemon.json"
     assert paths.browser_artifacts_dir == paths.browser_dir / "artifacts"
     assert paths.browser_console_log == paths.browser_dir / "console.log"

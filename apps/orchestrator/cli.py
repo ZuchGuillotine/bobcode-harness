@@ -6,9 +6,10 @@ import argparse
 import asyncio
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from datetime import UTC
+from pathlib import Path
 from typing import Any
 
 from packages.config import (
@@ -29,9 +30,24 @@ def _iter_task_roots(project_name: str | None = None) -> list[tuple[str | None, 
         paths = get_project_paths(project_name=project_name)
         return [(project_name, paths.tasks_dir)]
 
-    roots = [(name, get_project_paths(project_name=name).tasks_dir) for name, _ in iter_registered_projects()]
+    roots: list[tuple[str | None, Path]] = []
+    seen: set[Path] = set()
+
+    current_repo = _current_git_repo()
+    if current_repo is not None:
+        paths = get_project_paths(repo_path=str(current_repo))
+        roots.append((paths.project_name, paths.tasks_dir))
+        seen.add(paths.tasks_dir)
+
+    for name, _ in iter_registered_projects():
+        tasks_dir = get_project_paths(project_name=name).tasks_dir
+        if tasks_dir in seen:
+            continue
+        roots.append((name, tasks_dir))
+        seen.add(tasks_dir)
+
     legacy = get_project_paths()
-    if legacy.tasks_dir.is_dir():
+    if current_repo is None and legacy.tasks_dir.is_dir() and legacy.tasks_dir not in seen:
         roots.append((None, legacy.tasks_dir))
     return roots
 
@@ -41,11 +57,23 @@ def _load_task(
     project_name: str | None = None,
 ) -> tuple[str | None, Path, dict[str, Any]] | None:
     """Load a task manifest and return ``(project_name, task_dir, manifest)``."""
-    located = find_task_dir(task_id, project_name=project_name)
-    if not located:
-        return None
+    if project_name:
+        located = find_task_dir(task_id, project_name=project_name)
+        if not located:
+            return None
+        located_project, task_dir = located
+    else:
+        located_project = None
+        task_dir: Path | None = None
+        for candidate_project, tasks_dir in _iter_task_roots():
+            candidate = tasks_dir / task_id
+            if candidate.is_dir():
+                located_project = candidate_project
+                task_dir = candidate
+                break
+        if task_dir is None:
+            return None
 
-    located_project, task_dir = located
     manifest_path = task_dir / "manifest.json"
     if not manifest_path.is_file():
         return None
@@ -65,7 +93,11 @@ def _list_tasks(project_name: str | None = None) -> list[tuple[str | None, str, 
     for name, tasks_dir in _iter_task_roots(project_name):
         if not tasks_dir.is_dir():
             continue
-        for task_dir in sorted(p for p in tasks_dir.iterdir() if p.is_dir() and p.name.startswith("TASK-")):
+        task_dirs = (
+            p for p in tasks_dir.iterdir()
+            if p.is_dir() and p.name.startswith("TASK-")
+        )
+        for task_dir in sorted(task_dirs):
             manifest_path = task_dir / "manifest.json"
             manifest: dict[str, Any] = {}
             if manifest_path.is_file():
@@ -209,6 +241,26 @@ def _is_git_repo(path: Path) -> bool:
     return result.returncode == 0 and result.stdout.strip() == "true"
 
 
+def _current_git_repo(path: str | Path = ".") -> Path | None:
+    """Return the git top-level path for *path*, or None outside a worktree."""
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return Path(result.stdout.strip()).expanduser().resolve()
+
+
+def _local_state_ignore(repo_path: Path) -> tuple[Path, list[str]]:
+    """Keep repo-local harness runtime artifacts out of tracked files."""
+    ignore_path = repo_path / ".git" / "info" / "exclude"
+    added = _upsert_lines(ignore_path, [".bobcode/", ".codegraph/"])
+    return ignore_path, added
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -219,16 +271,36 @@ def cmd_submit(args: argparse.Namespace) -> None:
 
     description = args.description
     task_type = args.type
-    project_name = args.project
+    project_name = args.project or None
+    repo_path: str | None = None
+    if project_name is None:
+        current_repo = _current_git_repo()
+        if current_repo is None:
+            print(
+                "No registered project specified and current directory is not a git repo. "
+                "Run from a repo or pass --project.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        repo_path = str(current_repo)
 
     print(f"Submitting task: {description}")
     print(f"Type: {task_type}")
     if project_name:
         print(f"Project: {project_name}")
+    elif repo_path:
+        print(f"Repo: {repo_path}")
     print()
 
     try:
-        result = asyncio.run(run_task(description, task_type, project_name=project_name))
+        result = asyncio.run(
+            run_task(
+                description,
+                task_type,
+                project_name=project_name,
+                repo_path=repo_path,
+            )
+        )
         print("Task completed.")
         _print_json({
             "task_id": result.get("task_id"),
@@ -275,8 +347,9 @@ def cmd_status(args: argparse.Namespace) -> None:
 
         for project_name, task_id, manifest in tasks:
             if manifest:
+                display_project = manifest.get("project_name") or project_name or "legacy"
                 print(
-                    f"  {task_id}  project={(manifest.get('project_name') or project_name or 'legacy'):15s}  "
+                    f"  {task_id}  project={display_project:15s}  "
                     f"type={manifest.get('task_type', '?'):20s}  "
                     f"created={manifest.get('created_at', '?')}"
                 )
@@ -366,10 +439,231 @@ def cmd_reject(args: argparse.Namespace) -> None:
     print(f"Task {task_id} rejected: {reason}")
 
 
+def cmd_init(args: argparse.Namespace) -> None:
+    """Initialise repo-local BOBCODE state for the current repository."""
+    from datetime import datetime
+
+    from packages.repo_intel.codegraph_manager import build_codegraph
+
+    repo_root = _current_git_repo(args.path)
+    if repo_root is None:
+        print(f"Not a git repository: {args.path}", file=sys.stderr)
+        sys.exit(1)
+
+    project_name = args.name or repo_root.name
+    repo_context = _detect_repo_context(str(repo_root))
+    project_paths = get_project_paths(repo_path=str(repo_root))
+    project_paths.ensure_dirs()
+
+    ignore_path, added_entries = _local_state_ignore(repo_root)
+
+    now = datetime.now(UTC).isoformat()
+    config_path = project_paths.project_dir / "bobcode.json"
+    existing: dict[str, Any] = {}
+    if config_path.is_file() and not args.force:
+        with config_path.open(encoding="utf-8") as fh:
+            existing = json.load(fh)
+
+    codegraph_status = "skipped"
+    codegraph_message = "Codegraph build skipped by operator request"
+    codegraph_path = repo_root / ".codegraph" / "graph.db"
+    if not args.skip_codegraph:
+        build_result = build_codegraph(repo_root, timeout_seconds=args.codegraph_timeout)
+        codegraph_path = build_result.artifact_path
+        codegraph_status = "ready" if build_result.success else "unavailable"
+        codegraph_message = build_result.message
+
+    payload = {
+        "version": 1,
+        "project": {
+            "name": project_name,
+            "repo_path": str(repo_root),
+            "created_at": existing.get("project", {}).get("created_at", now),
+            "updated_at": now,
+        },
+        "repo_context": repo_context,
+        "runtime": {
+            "state_dir": str(project_paths.project_dir),
+            "tasks_dir": str(project_paths.tasks_dir),
+            "worktree_base": str(project_paths.worktree_base),
+        },
+        "codegraph": {
+            "status": codegraph_status,
+            "artifact_path": str(codegraph_path),
+            "last_checked_at": now,
+            "last_message": codegraph_message,
+        },
+    }
+    if codegraph_status == "ready":
+        payload["codegraph"]["last_built_at"] = now
+
+    config_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    feature_list_path = project_paths.project_dir / "feature_list.json"
+    if args.force or not feature_list_path.exists():
+        feature_list_path.write_text(
+            json.dumps({"version": 1, "features": []}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    progress_path = project_paths.project_dir / "progress.jsonl"
+    progress_path.touch(exist_ok=True)
+
+    if args.assisted:
+        agents_md_path = repo_root / "AGENTS.md"
+        if args.force or not agents_md_path.exists():
+            agents_md_path.write_text(
+                _build_agents_md(project_name, repo_context),
+                encoding="utf-8",
+            )
+
+    print(f"Initialised BOBCODE for: {project_name}")
+    print(f"  Repo: {repo_root}")
+    print(f"  State: {project_paths.project_dir}")
+    print(f"  Config: {config_path}")
+    if added_entries:
+        print(f"  Updated {ignore_path}: added {', '.join(added_entries)}")
+    print(f"  Codegraph: {codegraph_status} — {codegraph_message}")
+    print("  Submit tasks with: harness-ctl submit 'description'")
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    """Run local preflight checks for a repo-local BOBCODE install."""
+    import shutil
+
+    repo_root = _current_git_repo(args.path)
+    checks: list[dict[str, Any]] = []
+
+    def add(name: str, ok: bool, detail: str, required: bool = False) -> None:
+        checks.append({
+            "name": name,
+            "ok": ok,
+            "required": required,
+            "detail": detail,
+        })
+
+    add(
+        "git_repo",
+        repo_root is not None,
+        str(repo_root) if repo_root else "not in a git repo",
+        True,
+    )
+
+    project_paths = None
+    config_data: dict[str, Any] = {}
+    if repo_root is not None:
+        project_paths = get_project_paths(repo_path=str(repo_root))
+        config_path = project_paths.project_dir / "bobcode.json"
+        add("local_state", project_paths.project_dir.is_dir(), str(project_paths.project_dir), True)
+        add("local_config", config_path.is_file(), str(config_path), True)
+        if config_path.is_file():
+            try:
+                config_data = json.loads(config_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                add("local_config_parse", False, f"invalid JSON: {exc}", True)
+            else:
+                add("local_config_parse", True, "bobcode.json is valid JSON")
+
+        graph_path = repo_root / ".codegraph" / "graph.db"
+        codegraph_bin = shutil.which("codegraph")
+        add("codegraph_binary", codegraph_bin is not None, codegraph_bin or "missing")
+        add("codegraph_artifact", graph_path.is_file(), str(graph_path))
+
+        repo_context = config_data.get("repo_context", {})
+        for key in ("build_cmd", "test_cmd", "lint_cmd"):
+            value = repo_context.get(key, "# TODO")
+            add(key, bool(value and value != "# TODO"), value)
+
+    has_model_key = any(
+        os.environ.get(name)
+        for name in (
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "GOOGLE_API_KEY",
+        )
+    )
+    model_key_detail = (
+        "at least one provider key is set"
+        if has_model_key
+        else "no provider key found"
+    )
+    add("model_api_key", has_model_key, model_key_detail)
+
+    browser_pkg = Path(__file__).resolve().parents[2] / "tools" / "browser-daemon" / "package.json"
+    add("browser_daemon", browser_pkg.is_file(), str(browser_pkg))
+
+    if args.json:
+        _print_json({"checks": checks, "ok": all(c["ok"] for c in checks if c["required"])})
+    else:
+        for check in checks:
+            if check["ok"]:
+                marker = "OK"
+            elif check["required"]:
+                marker = "FAIL"
+            else:
+                marker = "WARN"
+            print(f"{marker:4s} {check['name']:<22} {check['detail']}")
+
+    if any((not c["ok"]) and c["required"] for c in checks):
+        sys.exit(1)
+
+
+def cmd_inbox(args: argparse.Namespace) -> None:
+    """Show tasks that need operator attention."""
+    rows: list[dict[str, Any]] = []
+    terminal_statuses = {"done", "completed"}
+
+    for project_name, tasks_dir in _iter_task_roots(args.project or None):
+        if not tasks_dir.is_dir():
+            continue
+        task_dirs = (
+            p for p in tasks_dir.iterdir()
+            if p.is_dir() and p.name.startswith("TASK-")
+        )
+        for task_dir in sorted(task_dirs):
+            manifest_path = task_dir / "manifest.json"
+            if not manifest_path.is_file():
+                continue
+            with manifest_path.open(encoding="utf-8") as fh:
+                manifest = json.load(fh)
+
+            eval_path = task_dir / "evals" / "validation.json"
+            validation: dict[str, Any] = {}
+            if eval_path.is_file():
+                with eval_path.open(encoding="utf-8") as fh:
+                    validation = json.load(fh)
+
+            status = validation.get("final_status") or manifest.get("status", "pending")
+            if not args.all and status in terminal_statuses:
+                continue
+
+            rows.append({
+                "task_id": task_dir.name,
+                "project": manifest.get("project_name") or project_name or "local",
+                "status": status,
+                "type": manifest.get("task_type", "?"),
+                "description": manifest.get("description", "")[:80],
+            })
+
+    if not rows:
+        print("Inbox is empty.")
+        return
+
+    print(f"{'Task ID':<12} {'Project':<18} {'Status':<14} {'Type':<18} Description")
+    print("-" * 100)
+    for row in rows:
+        print(
+            f"{row['task_id']:<12} {row['project']:<18} {row['status']:<14} "
+            f"{row['type']:<18} {row['description']}"
+        )
+
+
 def cmd_register(args: argparse.Namespace) -> None:
     """Register a project for harness management."""
+    from datetime import datetime
+
     import yaml
-    from datetime import datetime, timezone
 
     from packages.repo_intel.codegraph_manager import build_codegraph
 
@@ -418,7 +712,8 @@ def cmd_register(args: argparse.Namespace) -> None:
         else:
             print(f"  {build_result.message}", file=sys.stderr)
             print(
-                "  Registration aborted. Install/configure codegraph or rerun with --skip-codegraph for degraded mode.",
+                "  Registration aborted. Install/configure codegraph or rerun with "
+                "--skip-codegraph for degraded mode.",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -458,7 +753,7 @@ def cmd_register(args: argparse.Namespace) -> None:
             project_config.get("project", {}).get("registered_at")
         )
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     project_config["project"] = {
         "name": project_name,
         "repo_path": repo_path,
@@ -519,7 +814,7 @@ def cmd_feedback_status(args: argparse.Namespace) -> None:
 
 def cmd_feedback_consent(args: argparse.Namespace) -> None:
     """Set community feedback sharing consent."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from packages.learning.community_exchange import validate_consent_level
 
@@ -529,7 +824,7 @@ def cmd_feedback_consent(args: argparse.Namespace) -> None:
     harness_config_path, cfg = _load_harness_yaml()
     feedback_cfg = cfg.setdefault("community_feedback", {})
     feedback_cfg["consent"] = consent
-    feedback_cfg["updated_at"] = datetime.now(timezone.utc).isoformat()
+    feedback_cfg["updated_at"] = datetime.now(UTC).isoformat()
     feedback_cfg["updated_by"] = actor
     _save_harness_yaml(harness_config_path, cfg)
 
@@ -613,6 +908,52 @@ def build_parser() -> argparse.ArgumentParser:
     p_list = subparsers.add_parser("list", help="List all tasks")
     p_list.add_argument("--project", default="", help="Registered project name")
 
+    # init
+    p_init = subparsers.add_parser("init", help="Initialise BOBCODE in the current repo")
+    p_init.add_argument(
+        "path",
+        nargs="?",
+        default=".",
+        help="Repository path (default: current directory)",
+    )
+    p_init.add_argument("--name", default="", help="Project name (default: repo directory name)")
+    p_init.add_argument(
+        "--assisted",
+        action="store_true",
+        help="Also create/update AGENTS.md with detected build/test/lint commands",
+    )
+    p_init.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing repo-local BOBCODE metadata files",
+    )
+    p_init.add_argument(
+        "--skip-codegraph",
+        action="store_true",
+        help="Skip codegraph build during init",
+    )
+    p_init.add_argument(
+        "--codegraph-timeout",
+        type=int,
+        default=120,
+        help="Timeout in seconds for codegraph build (default: 120)",
+    )
+
+    # doctor
+    p_doctor = subparsers.add_parser("doctor", help="Check local BOBCODE readiness")
+    p_doctor.add_argument(
+        "path",
+        nargs="?",
+        default=".",
+        help="Repository path (default: current directory)",
+    )
+    p_doctor.add_argument("--json", action="store_true", help="Emit JSON instead of text")
+
+    # inbox
+    p_inbox = subparsers.add_parser("inbox", help="Show tasks needing operator attention")
+    p_inbox.add_argument("--project", default="", help="Registered project name")
+    p_inbox.add_argument("--all", action="store_true", help="Include terminal tasks")
+
     # approve
     p_approve = subparsers.add_parser("approve", help="Approve a task")
     p_approve.add_argument("task_id", help="Task ID to approve")
@@ -654,11 +995,17 @@ def build_parser() -> argparse.ArgumentParser:
         "feedback",
         help="Inspect and export anonymized community feedback",
     )
-    feedback_subparsers = p_feedback.add_subparsers(dest="feedback_command", help="Feedback commands")
+    feedback_subparsers = p_feedback.add_subparsers(
+        dest="feedback_command",
+        help="Feedback commands",
+    )
 
     feedback_subparsers.add_parser("status", help="Show feedback consent and export status")
 
-    p_feedback_consent = feedback_subparsers.add_parser("consent", help="Set feedback sharing consent")
+    p_feedback_consent = feedback_subparsers.add_parser(
+        "consent",
+        help="Set feedback sharing consent",
+    )
     p_feedback_consent.add_argument(
         "level",
         choices=["local_only", "anonymized_export"],
@@ -670,7 +1017,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Operator name recorded with the consent change",
     )
 
-    p_feedback_export = feedback_subparsers.add_parser("export", help="Export feedback bundle for upstream sharing")
+    p_feedback_export = feedback_subparsers.add_parser(
+        "export",
+        help="Export feedback bundle for upstream sharing",
+    )
     p_feedback_export.add_argument(
         "--all",
         action="store_true",
@@ -715,6 +1065,9 @@ def main() -> None:
         "status": cmd_status,
         "budget": cmd_budget,
         "list": cmd_list,
+        "init": cmd_init,
+        "doctor": cmd_doctor,
+        "inbox": cmd_inbox,
         "approve": cmd_approve,
         "reject": cmd_reject,
         "register": cmd_register,

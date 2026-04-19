@@ -21,13 +21,6 @@ tracing:
   phoenix_port: 6006
   export_dir: data/traces
 
-notifications:
-  telegram:
-    enabled: true
-    project: ""  # Optional: bind the bot to a registered project; auto-selects when exactly one exists
-    allowed_chat_ids: []  # Add your Telegram chat IDs here
-    polling_interval: 1
-
 community_feedback:
   consent: local_only
   export_dir: data/community/exports

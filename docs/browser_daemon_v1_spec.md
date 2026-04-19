@@ -22,14 +22,14 @@ V1 does not include:
 ## Why This Fits This Repo
 
 The harness already has:
-- per-project runtime storage in `data/projects/<project>/...`
-- stage boundaries at intake, plan, execute, validate, learn
+- repo-local runtime storage in `.bobcode/`
+- stage boundaries at intake, plan, execute, initial review, worker fix, final review, learn
 - worker and reviewer tool loops
 
 Relevant local integration points:
 - `packages/config/runtime.py`
 - `apps/orchestrator/stages/execute.py`
-- `apps/orchestrator/stages/validate.py`
+- `apps/orchestrator/stages/review_pipeline.py`
 - `apps/orchestrator/agents/worker.py`
 - `apps/orchestrator/agents/reviewer.py`
 - `apps/orchestrator/task_router.py`
@@ -84,13 +84,13 @@ tests/unit/
 
 tests/integration/
   test_browser_daemon_lifecycle.py
-  test_browser_validate_flow.py
+  test_browser_review_flow.py
 ```
 
 Per-project runtime files:
 
 ```text
-data/projects/<project>/browser/
+.bobcode/browser/
   daemon.json
   console.log
   network.log
@@ -333,7 +333,7 @@ Routing heuristics:
 
 ## Validation Changes
 
-Add deterministic checks in `validate.py`:
+Add deterministic checks in the review pipeline:
 - if `requires_browser_verification` is true, fail validation when no `browser_evidence` artifact exists
 - fail validation when browser console logs include uncaught runtime errors unless explicitly waived in the plan
 - record browser verification summary in `eval_results`

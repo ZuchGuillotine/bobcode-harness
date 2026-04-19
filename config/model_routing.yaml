@@ -27,6 +27,13 @@ routing:
     temperature: 0.1
     note: "GPT-5.4 first-pass review — catches issues before fix cycle."
 
+  reviewer:
+    model: openai/gpt-5.4
+    fallback: openai/gpt-5.4-mini
+    max_tokens: 4000
+    temperature: 0.1
+    note: "Compatibility route for legacy single-pass reviewer flows."
+
   worker_fix:
     model: openrouter/qwen/qwen3.5-397b-a17b
     fallback: anthropic/claude-sonnet-4-6

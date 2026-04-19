@@ -36,7 +36,9 @@ class TestBuildGraph:
         assert "intake" in node_names
         assert "plan" in node_names
         assert "execute" in node_names
-        assert "validate" in node_names
+        assert "initial_review" in node_names
+        assert "worker_fix" in node_names
+        assert "final_review" in node_names
         assert "learn" in node_names
         assert "route_result" in node_names
 
@@ -102,8 +104,8 @@ class TestIntakeNode:
         # Budget defaults should be populated
         assert result["budget"]["max_tokens"] == 500_000
 
-        # Task directory should live under the external project data dir
-        task_dir = tmp_path / "data" / "projects" / repo_path.name / "tasks" / result["task_id"]
+        # Task directory should live under repo-local BOBCODE state for direct repo use
+        task_dir = repo_path / ".bobcode" / "tasks" / result["task_id"]
         assert task_dir.is_dir()
         assert (task_dir / "manifest.json").is_file()
 

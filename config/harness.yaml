@@ -21,12 +21,6 @@ tracing:
   phoenix_port: 6006
   export_dir: data/traces
 
-notifications:
-  telegram:
-    enabled: true
-    allowed_chat_ids: []  # Configure with authorized Telegram chat IDs
-    polling_interval: 1
-
 community_feedback:
   consent: local_only
   export_dir: data/community/exports

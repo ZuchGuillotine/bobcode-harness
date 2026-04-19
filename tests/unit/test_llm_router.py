@@ -70,12 +70,12 @@ class TestResolveModel:
     def test_resolve_model_planner(self) -> None:
         primary, fallbacks = self.router._resolve_model("planner")
         assert primary == "anthropic/claude-opus-4-6"
-        assert "openai/gpt-5.4-mini" in fallbacks
+        assert "openai/gpt-5.4" in fallbacks
 
     def test_resolve_model_worker(self) -> None:
         primary, fallbacks = self.router._resolve_model("worker")
-        assert primary == "anthropic/claude-sonnet-4-6"
-        assert "openai/gpt-5.4-mini" in fallbacks
+        assert primary == "openrouter/qwen/qwen3.5-397b-a17b"
+        assert "anthropic/claude-sonnet-4-6" in fallbacks
 
     def test_resolve_model_lightweight(self) -> None:
         primary, fallbacks = self.router._resolve_model("lightweight")

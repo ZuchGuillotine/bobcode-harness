@@ -83,3 +83,25 @@ def test_get_community_dir_uses_harness_data_dir(
     monkeypatch.setenv("HARNESS_HOME", str(harness_root))
 
     assert get_community_dir() == harness_root / "data" / "community"
+
+
+def test_repo_path_uses_repo_local_bobcode_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness_root = tmp_path / "harness"
+    (harness_root / "config").mkdir(parents=True)
+    (harness_root / "config" / "harness.yaml").write_text(
+        "harness:\n  data_dir: data\n",
+        encoding="utf-8",
+    )
+    repo_path = tmp_path / "demo-repo"
+    repo_path.mkdir()
+
+    monkeypatch.setenv("HARNESS_HOME", str(harness_root))
+
+    paths = get_project_paths(repo_path=str(repo_path))
+
+    assert paths.repo_path == repo_path.resolve()
+    assert paths.project_dir == repo_path / ".bobcode"
+    assert paths.tasks_dir == repo_path / ".bobcode" / "tasks"

@@ -65,7 +65,7 @@ def test_promptfoo_runner_ignores_legacy_repo_local_output_dir(
 
     runner = PromptfooRunner(repo_path=str(repo_path))
 
-    assert runner._output_dir == harness_root / "data" / "projects" / "demo-repo" / "eval_outputs"
+    assert runner._output_dir == repo_path / ".bobcode" / "eval_outputs"
 
 
 def test_promptfoo_runner_resolves_marketing_suite_by_skill_id(

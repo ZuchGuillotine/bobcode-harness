@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import yaml
 
@@ -170,7 +171,7 @@ def get_project_paths(
     if resolved_repo:
         repo = Path(resolved_repo).expanduser().resolve()
         inferred_name = repo.name
-        project_dir = data_dir / "projects" / inferred_name
+        project_dir = repo / ".bobcode"
         return ProjectPaths(
             project_name=inferred_name,
             repo_path=repo,
